@@ -20,3 +20,7 @@ vignettes/*.pdf
 
 # eclipse project info
 .project
+
+# ignore package object files
+src/*.o
+src/*.so

@@ -6,13 +6,15 @@ Date: 2016-03-13
 Author: Gregory Imholte
 Maintainer: Gregory Imholte <gimholte@gmail.com>
 Description: Robust Bayesian analysis of Luminex bead-based assays
-Imports: 
-	parallel, 
-	data.table, 
-	fastGHQuad, 
-Depends: 
-	Rcpp (>= 0.10.5), 
-	RcppArmadillo (>= 0.3.920.1),
+Imports:
+    parallel,
+    data.table
+Depends:
+    Rcpp (>= 0.10.5),
+    RcppArmadillo (>= 0.3.920.1)
+Suggests:
+    testthat
 LinkingTo: Rcpp, RcppArmadillo
 VignetteBuilder: knitr
 License: GPLv3
+RoxygenNote: 5.0.0
