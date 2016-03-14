@@ -7,6 +7,7 @@
 #' 
 #' @return some output
 #' @export 
+#' @useDynLib rBalm
 
 rBalm <- function(data, n_iter, n_burn) {
     d_list <- list(x = rnorm(100))
