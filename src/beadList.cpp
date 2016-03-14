@@ -5,7 +5,7 @@
 
 beadList::beadList(Rcpp::List & bead_el, double prior_scale, double prior_rate) :
         median(Rcpp::as<double>(bead_el["median"])),
-        sad(Rcpp::as<double>(bead_el["sad"])),
+        sum_d(Rcpp::as<double>(bead_el["sum_d"])),
         scale_prior_shape(prior_scale),
         scale_prior_rate(prior_rate),
         j(Rcpp::as<int>(bead_el["j"]))
@@ -16,14 +16,10 @@ beadList::beadList(Rcpp::List & bead_el, double prior_scale, double prior_rate) 
     ll = bead_el["d"];
     d = Rcpp::NumericVector(ll);
 
-    ll = bead_el["scale"];
-    scale = Rcpp::as<double>(ll);
-
-    ll = bead_el["mu"];
-    mu = Rcpp::as<double>(ll);
-
+    mu = median;
     mcmc_scale_mult = 3.0;
     n = sort_x.size();
+    scale = sum_d / n;
 }
 
 double beadList::computeSumAbsDev(double & x) {
@@ -51,7 +47,7 @@ double beadList::computeSumAbsDev(double & x) {
     for (int i = istart; i != k + k_increment; i += k_increment) {
         deduct -= 2.0 * d(i);
     }
-    return sad + deduct + k_increment * m_x * (2 * (k + 1) - n + (k_increment - 1));
+    return sum_d + deduct + k_increment * m_x * (2 * (k + 1) - n + (k_increment - 1));
 }
 
 double beadList::computeLaplaceLikelihood(double & x) {
