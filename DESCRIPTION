@@ -14,7 +14,7 @@ Depends:
     RcppArmadillo (>= 0.3.920.1)
 Suggests:
     testthat
-LinkingTo: Rcpp, RcppArmadillo
+LinkingTo: Rcpp, RcppEigen
 VignetteBuilder: knitr
 License: GPLv3
 RoxygenNote: 5.0.0
