@@ -7,7 +7,8 @@ test_that("bead distributions have proper named attributes", {
             processed_beads <- beadListInit(beads)
             
             expect_true(all(names(processed_beads[[1]]) %in%
-                                    c("sort_x", "sum_d", "d", "j", "median")))
+                                    c("x_sorted", "sum_abs_dev_median", "abs_dev_from_median",
+                                            "j", "x_median")))
         })
 
 test_that("sum of absolute deviations are correct", {
@@ -43,17 +44,16 @@ test_that("sum of absolute deviations are correct (with ties)", {
             expect_equivalent(sum_abs_devs_cpp, sum_abs_devs)
         })
 
-
 test_that("markov chain monte carlo successfully executes", {
             set.seed(123)
             beadListMcmcTest <- function(beads, n_iter) {
                 processed_beads <- beadListInit(beads);
-                bead_prior <- list("prior_shape" = 1.0, "prior_rate" = 1.0)
-                chain_ctl <- list("n_iter" = n_iter)
+                chain_ctl <- list("n_iter" = n_iter,
+                        "n_thin" = 1,
+                        "n_burn" = 100)
                 mcmc_out <- .Call("beadListMcmcTest",
                         processed_beads,
                         chain_ctl,
-                        bead_prior, 
                         PACKAGE = "rBalm")
                 return(mcmc_out)
             }
@@ -62,7 +62,7 @@ test_that("markov chain monte carlo successfully executes", {
             n_iter <- 1000
             beads <- lapply(n, rnorm, mean = 0, sd = 1)
             out <- beadListMcmcTest(beads, n_iter)
-            expect_equivalent(dim(out[[1]]), c(n_dists, n_iter))
-            expect_equivalent(dim(out[[1]]), c(n_dists, n_iter))
+            expect_equivalent(dim(out[[1]]), c(n_iter, n_dists))
+            expect_equivalent(dim(out[[1]]), c(n_iter, n_dists))
         })
 
