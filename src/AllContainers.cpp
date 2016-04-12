@@ -1,0 +1,579 @@
+#include <vector>
+#include <map>
+#include <string>
+#include <RcppEigenForward.h>
+#include "RngStream.h"
+#include "Rv.h"
+#include "AllContainersForward.h"
+#include <Rcpp.h>
+#include <RcppEigenWrap.h>
+#include "AllContainers.h"
+
+namespace Rcpp {
+    /* Define the conversion from SEXP to BeadDist object
+     * This is kind of a wrapper for what already happens in the BeadDist constructor*/
+    template<> BeadDist as(SEXP bead_dist_sexp) {
+        Rcpp::List bead_dist(bead_dist_sexp);
+        BeadDist ell(bead_dist);
+        return ell;
+    };
+};
+
+using namespace std;
+using namespace Rcpp;
+using namespace Eigen;
+typedef SparseMatrix<double> SpMat;
+
+bool checkListNames(const vector<string> & names, const List & ll);
+bool checkListNames(const vector<string> & names, const List & ll) {
+    bool all_in(true);
+    for (size_t i = 0, n = names.size(); i < n; i++) {
+        all_in &= ll.containsElementNamed(names[i].c_str());
+    }
+    return all_in;
+}
+
+ModelData::ModelData(SEXP r_bead_dist_list) {
+    initializeListNames();
+    Rcpp::List bead_dist_list(r_bead_dist_list);
+    Rcpp::List::iterator in_iter, in_end = bead_dist_list.end();
+    for (in_iter = bead_dist_list.begin(); in_iter != in_end; ++in_iter) {
+        checkListNames(r_names, *in_iter); // rely on implicit conversion to List.
+        bead_vec.push_back(as<BeadDist>(*in_iter));
+    }
+    n_mfi = bead_vec.size();
+    y.resize(n_mfi);
+    this->fillY();
+};
+
+void ModelData::update(RngStream rng,
+        VectorXd & mu_prior_mean,
+        VectorXd & mu_prior_precision,
+        const double precision_prior_shape,
+        const double precision_prior_rate) {
+    if (mu_prior_mean.rows() != n_mfi)
+        stop("invalid length of mu_prior_mean in BeadDist update");
+
+    if (mu_prior_precision.rows() != n_mfi)
+        stop("invalid length of mu_prior_precision in BeadDist update");
+
+    double m, nu;
+    int i;
+    std::vector<BeadDist>::iterator it_bd, bd_end = bead_vec.end();
+    for (i = 0, it_bd = bead_vec.begin(); it_bd != bd_end; ++it_bd, ++i) {
+        m = mu_prior_mean(i);
+        nu = mu_prior_precision(i);
+        it_bd->updateLaplacePrecision(rng, precision_prior_shape,
+                precision_prior_rate);
+        it_bd->updateLaplaceMu(rng, m, nu);
+        y(i) = it_bd->getMu();
+    }
+    return;
+};
+
+ChainParameters::ChainParameters(SEXP r_chain_pars) {
+    initializeListNames();
+    List chain_pars(r_chain_pars);
+    bool is_ok = checkListNames(r_names, chain_pars);
+    if (!is_ok)
+        stop("Missing required list elements in Chain component initialization");
+    std::vector<std::string>::iterator it;
+    for (it = r_names.begin(); it != r_names.end(); ++it) {
+        iter_pars[*it] = as<int>(chain_pars[it->c_str()]);
+    }
+};
+
+Latent::Latent(SEXP r_latent_term) {
+    initializeListNames();
+    /* check that provided list has required named elements */
+    List latent_term(r_latent_term);
+    if (!checkListNames(r_names, latent_term))
+        stop("Missing required list elements in Latent component initialization");
+
+    /* check that we have one term in latent model formula */
+    List cnms = latent_term["cnms"]; // implicit conversion
+    if (cnms.size() != 1)
+        stop("Invalid number of terms in latent model formula");
+
+    /* check that number of term levels for each group level is two */
+    CharacterVector cnms_tmp = cnms[0]; // implicit conversion
+    if (cnms_tmp.size() != 2)
+        stop("Invalid number of latent response levels in latent model (must be 2)");
+
+    Mt = latent_term["Zt"]; // implicit conversion
+    M = Mt.transpose();
+    const int nmu = Mt.rows();
+    const int nobs = Mt.cols();
+    mu_g = VectorXd::Constant(nmu, 0.0);
+    nu_g = VectorXd::Constant(nmu, 100.0);
+    gamma = VectorXd::Constant(nmu / 2, 0);
+    counts = Mt * VectorXd::Constant(nobs, 1.0);
+
+    yss_w = VectorXd::Constant(nmu, 1.0);
+    sum_y_w = VectorXd::Constant(nmu, 0.0);
+    sum_yy_w = VectorXd::Constant(nmu, 0.0);
+    resid = VectorXd::Constant(nobs, 1.0);
+    fitted = M * mu_g;
+    weights = M * nu_g;
+
+    Rcout << "Initialized latent component... ";
+};
+
+void Latent::update(RngStream rng, const VectorXd & data_y,
+        const VectorXd & linear_fitted, const Hypers & hypers) {
+    updateMu(rng, data_y, linear_fitted, hypers);
+    updateNu(rng, data_y, linear_fitted, hypers);
+    return;
+}
+
+void Latent::updateNu(RngStream rng, const VectorXd & data_y,
+        const VectorXd & linear_fitted, const Hypers & hypers) {
+    double joint_rate, joint_shape;
+    resid.noalias() = data_y - fitted - linear_fitted;
+    yss_w.noalias() = Mt * resid.cwiseProduct(resid);
+    size_t j, n = nu_g.size();
+    for (j = 0; j < n; j++) {
+        joint_shape = hypers.mfi_nu_shape + counts(j) / 2.0;
+        joint_rate = hypers.mfi_nu_rate + yss_w(j) / 2.0;
+        nu_g(j) = RngStream_GA1(joint_shape, rng) / joint_rate;
+    }
+    weights.noalias() = M * nu_g;
+    return;
+}
+
+void Latent::updateMu(RngStream rng, const VectorXd & data_y,
+            const VectorXd & linear_fitted, const Hypers & hypers) {
+    double c0, c1, c01;
+    double l0, l1, l01;
+    double mu0, mu1, mu01;
+    double null_prob;
+    sum_y_w.noalias() = Mt * (data_y - linear_fitted).cwiseProduct(weights);
+    sum_yy_w.noalias() = Mt * (data_y - linear_fitted).cwiseProduct(data_y - linear_fitted).cwiseProduct(weights);
+
+    size_t i, j, jp1, n_group = mu_g.size() / 2;
+    for (i = 0, j = 0, jp1 = 1;
+            i < n_group;
+            ++i, j += 2, jp1 += 2) {
+        l0 = hypers.gam0 + counts(j) * nu_g(j);
+        l1 = hypers.gam1 + counts(jp1) * nu_g(jp1);
+        l01 = hypers.gam01 + counts(j) * nu_g(j) + counts(jp1) * nu_g(jp1);
+
+        mu0 = sum_y_w(j) / l0;
+        mu1 = sum_y_w(jp1) / l1;
+        mu01 = (sum_y_w(j) + sum_y_w(jp1)) / l01;
+
+        c0 = -.5 * sum_yy_w(j);
+        c0 += .5 * pow(sum_y_w(j), 2) / l0;
+        c0 += .5 * log(hypers.gam0) -.5 * log(l0);
+
+        c1 = -.5 * sum_yy_w(jp1);
+        c1 += .5 * pow(sum_y_w(jp1), 2) / l1;
+        c1 += .5 * log(hypers.gam1) -.5 * log(l1);
+
+        c01 = -.5 * sum_yy_w(j) -.5 * sum_yy_w(jp1);
+        c01 += .5 * pow(sum_y_w(j) + sum_y_w(jp1), 2) / l01;
+        c01 += .5 * log(hypers.gam01) -.5 * log(l01);
+
+        null_prob = (1 - hypers.p) / (hypers.p * exp(c0 + c1 - c01) + (1 - hypers.p));
+        if (RngStream_RandU01(rng) < null_prob) {
+            mu01 = RngStream_N01(rng) / sqrt(l01) + mu01;
+            mu_g(j) = mu01;
+            mu_g(jp1) = mu01;
+            gamma(i) = 0.0;
+        } else {
+            mu_g(j) = RngStream_N01(rng) / sqrt(l0) + mu0;
+            mu_g(jp1) = RngStream_N01(rng) / sqrt(l1) + mu1;
+            gamma(i) = 1.0;
+        }
+    }
+    fitted = M * mu_g;
+    return;
+}
+
+Hypers::Hypers(SEXP r_fixed_hypers) {
+        initializeListNames();  //should only be called once.
+        List fixed_hypers(r_fixed_hypers);
+        bool is_ok = checkListNames(r_names, fixed_hypers);
+        if (!is_ok) {
+            stop("Missing required names for fixed hyper-parameters from R.");
+        }
+        gam0 = as<double>(fixed_hypers["gam0"]);
+        gam1 = as<double>(fixed_hypers["gam1"]);
+        gam01 = as<double>(fixed_hypers["gam01"]);
+        lambda_a_prior = as<double>(fixed_hypers["lambda_a_prior"]);
+        lambda_b_prior = as<double>(fixed_hypers["lambda_b_prior"]);
+        bead_precision_shape = as<double>(fixed_hypers["bead_precision_shape"]);
+        bead_precision_rate = as<double>(fixed_hypers["bead_precision_rate"]);
+
+        p = .05;
+        mfi_nu_shape = .5;
+        mfi_nu_rate = .5;
+        return;
+}
+
+Hypers::Hypers() :
+    mfi_nu_shape(.5),
+    mfi_nu_rate(.5),
+    p(.05),
+    gam0(.1),
+    gam1(.1),
+    gam01(.1),
+    lambda_a_prior(.05),
+    lambda_b_prior(.05),
+    bead_precision_rate(1.0),
+    bead_precision_shape(1.0) {};
+
+void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
+    const int n_nu = mfi_precision.size();
+    double sum_log_nu(0.0);
+    for (int i = 0; i < n_nu; i++) {
+        sum_log_nu += log(mfi_precision(i));
+    }
+    const double sum_nu = mfi_precision.sum();
+    const double z = integratedPrecisionConditional(mfi_nu_shape, n_nu,
+            sum_nu, sum_log_nu) - RngStream_GA1(1.0, rng);
+    /* z is the y-value for horizontal slice */
+    double w(5.0);
+    double R(mfi_nu_shape + w);
+    double L(mfi_nu_shape - w);
+    L = fmax(0.0, L);
+    double g_R = integratedPrecisionConditional(R, n_nu, sum_nu, sum_log_nu);
+    double g_L = integratedPrecisionConditional(L, n_nu, sum_nu, sum_log_nu);
+
+    while (g_R > z) {
+        R += w;
+        g_R = integratedPrecisionConditional(R, n_nu, sum_nu, sum_log_nu);
+    }
+
+    while (g_L > z) {
+        L -= w;
+        L = fmax(0.0, L);
+        g_L = integratedPrecisionConditional(L, n_nu, sum_nu, sum_log_nu);
+    }
+    double s = RngStream_UnifAB(L, R, rng);
+    while (integratedPrecisionConditional(s, n_nu, sum_nu, sum_log_nu) < z) {
+        if (s > mfi_nu_shape)
+            R = s;
+        else
+            L = s;
+        s = RngStream_UnifAB(L, R, rng);
+    }
+    mfi_nu_shape = s;
+    mfi_nu_rate = RngStream_GA1(n_nu * mfi_nu_shape + 1.0, rng) / (sum_nu + lambda_b_prior);
+}
+
+Linear::Linear(SEXP r_linear_terms) {
+    initializeListNames();
+    List linear_terms(r_linear_terms);
+    bool is_ok = checkListNames(r_names, linear_terms);
+    if (!is_ok)
+        stop("Missing required list elements in Linear component initialization");
+
+    theta = as<VectorXd>(linear_terms["theta"]);
+    Lambdat = as<SpMat>(linear_terms["Lambdat"]);
+    Zt = as<SpMat>(linear_terms["Zt"]);
+    LtZt = Lambdat * Zt;
+    List r_Ztlist = as<List>(linear_terms["Ztlist"]);
+
+    b = VectorXd::Constant(Zt.rows(), 0.0);
+    u = VectorXd::Constant(Zt.rows(), 0.0);
+    I_p.resize(Zt.rows(), Zt.rows());
+    I_p.setIdentity();
+    Omega = LtZt * LtZt.transpose() + I_p;
+
+    helpers.solver.analyzePattern(Omega);
+    helpers.work_theta_vec = theta;
+    helpers.Lind = as<VectorXi>(linear_terms["Lind"]);
+    helpers.Lind -= VectorXi::Constant(helpers.Lind.rows(), 1);
+    helpers.b_offsets = as<VectorXi>(linear_terms["Gp"]);
+    helpers.theta_offsets = as<VectorXi>(linear_terms["theta_offsets"]);
+    helpers.component_p = as<VectorXi>(linear_terms["component_p"]);
+    helpers.lambda_offsets = VectorXi::Constant(helpers.component_p.rows() + 1, 0);
+
+    int n_component = r_Ztlist.size();
+    Ztlist.resize(n_component);
+    helpers.lambdat_blocks.resize(n_component);
+
+    for (int k = 0; k < n_component; k++) {
+        int within_theta_offset = helpers.theta_offsets(k);
+        int p = helpers.component_p(k);
+        components.push_back(CovarianceTemplate(within_theta_offset, p, 0.0));
+        SEXP ztk = r_Ztlist[k];
+        Ztlist[k] = as<SparseMatrix<double> >(ztk);
+        helpers.lambdat_blocks[k] = Lambdat.block(offsetB(k), offsetB(k), nB(k), nB(k));
+        helpers.lambda_offsets[k + 1] = helpers.lambdat_blocks[k].nonZeros() +
+                helpers.lambda_offsets[k];
+    };
+
+    if (!checkBlocks(helpers.lambdat_blocks, Lambdat)) {
+        stop("Bad lambdat_blocks transfer in class Linear constructor");
+    };
+    setFitted();
+};
+
+void Linear::update(RngStream rng, const VectorXd & latent_fitted,
+        const VectorXd & mfi_obs_weights, const VectorXd & data_y,
+        const Hypers & hypers) {
+    LtZt = Lambdat * Zt;
+    helpers.work_ny_vec = LtZt * mfi_obs_weights.asDiagonal() * (data_y - latent_fitted);
+    Omega = LtZt * mfi_obs_weights.asDiagonal() * LtZt.transpose() + I_p;
+    /* sample will be stored in u */
+    mvNormSim(rng, helpers.solver, Omega, helpers.work_ny_vec, u);
+    setFitted();
+
+    for (size_t i = 0; i < components.size(); ++i) {
+        updateComponent(rng, latent_fitted, mfi_obs_weights, data_y,
+                (int) i, Ztlist[i], helpers.lambdat_blocks[i], components[i]);
+    };
+    setFitted();
+}
+
+void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
+        const VectorXd & weights, const VectorXd & data_y,
+        const int k,
+        const SparseMatrix<double> & zt_block,
+        SparseMatrix<double> & lambdat_block,
+        CovarianceTemplate & cvt) {
+    const int nb = nB(k);
+    const int b_offset = offsetB(k);
+    MHValues mhv;
+
+    helpers.work_ny_vec.noalias() = data_y - latent_fitted - fitted;
+
+    const double cur_lik = thetaLikelihood(helpers.work_ny_vec, weights);
+
+    helpers.work_theta_vec = theta;
+    cvt.proposeTheta(rng, helpers.work_theta_vec, mhv);
+
+    helpers.work_ny_vec.noalias() += zt_block.transpose() *
+            lambdat_block.transpose() * u.segment(b_offset, nb);
+
+    setLambdaHelperBlock(helpers.work_theta_vec, k);
+    helpers.work_ny_vec.noalias() -= zt_block.transpose() *
+            lambdat_block.transpose() * u.segment(b_offset, nb);
+    const double prop_lik = thetaLikelihood(helpers.work_ny_vec, weights);
+
+    mhv.setCurLik(cur_lik);
+    mhv.setPropLik(prop_lik);
+   // Rcout << exp(mhv.logA()) << " " << cur_lik << " " << prop_lik << std::endl;
+
+
+    if (log(RngStream_RandU01(rng)) < mhv.logA()) {
+        // accept proposal
+        theta.noalias() = helpers.work_theta_vec;
+        setLambdaBlock(theta, k);
+        // update the internal state of the covariance template
+        // because its parameter representation is different
+        cvt.acceptLastProposal();
+    } else {
+        // reject proposal
+        // reset the lambda helper
+        setLambdaHelperBlock(theta, k);
+    }
+    return;
+}
+
+void Linear::setLambdaHelperBlock(VectorXd & new_theta, int block_idx) {
+    // use Lind to fill the block of lambdat at block_idx with values in new_theta
+    const int offset = offsetLambda(block_idx);
+    const int n_theta = nLambda(block_idx);
+    if (n_theta != helpers.lambdat_blocks[block_idx].nonZeros()) {
+        stop("nonzeros in lamdbat_block do not match replacement length");
+    }
+    for (int j = 0, i = offset; j < + n_theta; i++, j++) {
+        *(helpers.lambdat_blocks[block_idx].valuePtr() + j) = new_theta(Lind(i));
+    }
+    return;
+}
+
+void Linear::setLambdaBlock(VectorXd & new_theta, int block_idx) {
+    // use Lind to fill the block of lambdat starting at block_idx with values in new_theta
+    const int offset = offsetLambda(block_idx);
+    const int n_theta = nLambda(block_idx);
+    for (int i = offset; i < offset + n_theta; ++i) {
+        *(Lambdat.valuePtr() + i) = new_theta(Lind(i));
+    }
+    return;
+}
+
+double thetaLikelihood(const VectorXd & delta, const VectorXd & weights) {
+    return -.5 * delta.cwiseProduct(weights).dot(delta);
+}
+
+BeadDist::BeadDist(const Rcpp::List & bead_dist) :
+                        x_sorted(as<NumericVector>(bead_dist["x_sorted"])),
+                        abs_dev_from_median(as<NumericVector>(bead_dist["abs_dev_from_median"])),
+                        j(as<int>(bead_dist["j"])),
+                        x_median(as<double>(bead_dist["x_median"])),
+                        sum_abs_dev_median(as<double>(bead_dist["sum_abs_dev_median"]))
+{
+    mu = x_median;
+    precision = x_sorted.size() / sum_abs_dev_median;
+    sum_abs_dev_cur = sum_abs_dev_median;
+    mcmc_scale_mult = 3.0 / sqrt(2 * x_sorted.size() * precision);
+}
+
+double BeadDist::computeSumAbsDev(const double x) {
+    const double m_x(fabs(x_median - x));
+    const int n(x_sorted.size());
+    if (n == 2) {
+        return fabs(x_sorted(0) - x) + fabs(x_sorted(1) - x);
+    }
+    if (n == 1) {
+        return fabs(x_sorted(0) - x);
+    }
+    int k = j - 1;
+    double deduct = 0.0;
+    const int k_increment = (x >= x_median) ? 1 : -1;
+    while (1) {
+        if ((x - x_sorted(k + k_increment)) * k_increment <= 0.0) {
+            break;
+        }
+        k += k_increment;
+        if ((k + k_increment < 0) | (k + k_increment == n)) {
+            break;
+        }
+    }
+    const int istart = (x >= x_median) ? j : j - 1;
+    for (int i = istart; i != k + k_increment; i += k_increment) {
+        deduct -= 2.0 * abs_dev_from_median(i);
+    }
+    return sum_abs_dev_median +
+            deduct + k_increment * m_x * (2 * (k + 1) - n + (k_increment - 1));
+}
+
+double BeadDist::computeLaplaceLikelihood(const double sum_abs_dev_x) {
+    return -sum_abs_dev_x * precision + x_sorted.size() * log(precision);
+}
+
+void BeadDist::updateLaplacePrecision(RngStream rng,
+        const double precision_prior_shape, const double precision_prior_rate) {
+    // beads distributed Laplace(mu, prec^{-1})
+    // prec ~ Gamma(prec_prior_shape, prec_prior_rate)
+    // full conditional is then Gamma(n + prec_prior_shape, prec_prior_rate + sum_d)
+    const double full_conditional_rate = sum_abs_dev_cur + precision_prior_rate;
+    const double full_conditional_shape = x_sorted.size() + precision_prior_shape;
+    precision = RngStream_GA1(full_conditional_shape, rng) / full_conditional_rate;
+    return;
+}
+
+void BeadDist::updateLaplaceMu(RngStream rng, const double mu_prior_mean,
+        const double mu_prior_prec) {
+    const double prop_mu = RngStream_N01(rng) * mcmc_scale_mult + mu;
+    const double prop_smd = computeSumAbsDev(prop_mu);
+    const double prop_lik = computeLaplaceLikelihood(prop_smd);
+    const double prop_prior = -.5 * pow(prop_mu - mu_prior_mean, 2) * mu_prior_prec;
+
+    const double cur_lik = computeLaplaceLikelihood(sum_abs_dev_cur);
+    const double cur_prior = -.5 * pow(mu - mu_prior_mean, 2) * mu_prior_prec;
+
+    const double joint_prop = prop_lik + prop_prior;
+    const double joint_cur = cur_lik + cur_prior;
+
+    const double loga = joint_prop - joint_cur;
+    if (log(RngStream_RandU01(rng)) <= loga) {
+        mu = prop_mu;
+        sum_abs_dev_cur = prop_smd;
+    }
+    return;
+}
+
+void mvNormSim(RngStream rng, Eigen::SimplicialLLT<SpMat> & solver,
+        const SpMat & omega, const Eigen::VectorXd & tau, Eigen::VectorXd & sample) {
+    const size_t n = sample.size();
+    for (size_t i = 0; i < n; i++) {
+        *(sample.data() + i) = RngStream_N01(rng);
+    }
+    solver.factorize(omega);
+    solver.matrixU().solveInPlace(sample);
+    sample.noalias() += solver.solve(tau);
+}
+
+CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_) :
+    within_theta_offset_val(offset_val_),
+    p(p_),
+    rho(rho_),
+    prop_rho(rho_),
+    sigma(p_),
+    prop_sigma(p_),
+    D(p_, p_),
+    L_cor(p_, p_),
+    DL(p_, p_),
+    lower_tri(p_ * (p_ + 1) / 2)
+{
+    sigma.fill(1.0);
+    fillCholeskyDecomp();
+};
+
+void CovarianceTemplate::proposeTheta(RngStream rng, Eigen::VectorXd & theta,
+        MHValues & mhv) {
+    double cur_sig = sigma(0);
+    double prop_sig = exp(.5 * (RngStream_RandU01(rng) - .5)) * cur_sig;
+
+    // temporarily fill the internal state with proposal values
+    sigma.fill(prop_sig);
+    prop_sigma.fill(prop_sig);
+    fillCholeskyDecomp();
+    prop_rho = rho;
+
+    // input new theta value
+    fillTheta(theta);
+
+    // set MH proposal and prior values
+    mhv.setCurPrior(-.5 * log(cur_sig) + .5 * cur_sig);
+    mhv.setPropPrior(-.5 * log(prop_sig) + .5 * prop_sig);
+    mhv.setCurToProp( -log(prop_sig));
+    mhv.setPropToCur( -log(cur_sig));
+
+    // return to original internal state
+    sigma.fill(cur_sig);
+    fillCholeskyDecomp();
+    return;
+}
+
+void CovarianceTemplate::acceptLastProposal() {
+    sigma = prop_sigma;
+    rho = prop_rho;
+    fillCholeskyDecomp();
+}
+
+void CovarianceTemplate::fillCholeskyDecomp() {
+    /* fill diagonals of L_cor and D */
+    D.setZero();
+    L_cor.setZero();
+    int i, j, k;
+    double ell;
+    for (i = 0; i < p; i++) {
+        j = i + 1;
+        ell = sqrt(1.0 - (j - 1.0) * rho * rho / (1.0 + (j - 2.0) * rho));
+        L_cor(i, i) = ell;
+        D(i, i) = sigma(i);
+    };
+
+    /* fill off diagonal */
+    for (j = 1; j < p; j++) {
+        L_cor(j, 0) = rho;
+    };
+    for (k = 2; k < p; k++) {
+        for (j = k + 1; j <= p; j++) {
+            L_cor(j - 1, k - 1) = L_cor(k - 1, k - 1) * rho / (1.0 + (k - 1) * rho);
+        };
+    };
+    DL = D * L_cor;
+
+    /* extract the lower diagonal of overall covariance factor*/
+    k = 0;
+    for (j = 0; j < p; j++) {
+        for (i = j; i < p; i++) {
+            lower_tri(k) = DL(i, j);
+            ++k;
+        };
+    };
+    return;
+};
+
+
+
+
+
+
