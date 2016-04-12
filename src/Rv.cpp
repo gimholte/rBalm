@@ -50,7 +50,7 @@
 #include <math.h>
 #include "Rv.h"
 
-#define expmax (DBL_MAX_EXP * M_LN2)/* = log(DBL_MAX) */
+#define RV_EXPMAX (DBL_MAX_EXP * M_LN2)/* = log(DBL_MAX) */
 
 /* position of right-most step */
 #define PARAM_R 3.44428647676
@@ -252,7 +252,7 @@ double RngStream_Beta(const double aa, const double bb, RngStream rng) {
 
 #define v_w_from__u1_bet(AA) 			\
 	    v = beta * log(u1 / (1.0 - u1));	\
-	    if (v <= expmax) {			\
+	    if (v <= RV_EXPMAX) {			\
 		w = AA * exp(v);		\
 		if(std::isinf(w)) w = DBL_MAX;	\
 	    } else				\
@@ -344,7 +344,7 @@ double RngStream_LogitBeta(const double a, const double b, RngStream rng) {
 }
 
 double RngStream_TruncNorm(const double & mean, const double & sigmasqr,
-        RngStream & rng) {
+        RngStream rng) {
     if (!R_FINITE(mean)) {
         Rcpp::stop("Non-finite mean in TruncNorm sampler");
     }
@@ -397,4 +397,8 @@ double RngStream_T(const double df, RngStream rng) {
     const double w = sqrt(RngStream_GA1(df / 2.0, rng) * (2.0 / df));
     const double z = RngStream_N01(rng);
     return z / w;
+}
+
+double RngStream_UnifAB(const double & A, const double & B, RngStream rng) {
+    return RngStream_RandU01(rng) * (B - A) + A;
 }

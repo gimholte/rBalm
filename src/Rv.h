@@ -10,10 +10,11 @@
 
 #endif /* NORM_GAMMA_GENERATION_H_ */
 
-double RngStream_N01 (const RngStream r);
+double RngStream_N01 (RngStream r);
 double RngStream_GA1 (const double a, RngStream r);
 double RngStream_Beta (const double a, const double b, RngStream r);
 double RngStream_LogitBeta(const double a, const double b, RngStream rng);
 double RngStream_TruncNorm(const double & mean, const double & sigmasqr,
-        RngStream & rng);
+        RngStream rng);
 double RngStream_T(const double df, RngStream rng);
+double RngStream_UnifAB(const double & A, const double & B, RngStream rng);

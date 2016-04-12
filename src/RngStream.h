@@ -11,10 +11,9 @@ extern "C"{
 #endif
 
 typedef short boolean;
-#define FALSE 0
-#define TRUE 1
-
-#define pi 3.141592653589793238462643
+//#define FALSE 0
+//#define TRUE 1
+//#define pi 3.141592653589793238462643
 
 typedef struct RngStream_InfoState * RngStream;
 
