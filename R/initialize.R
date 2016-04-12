@@ -39,7 +39,7 @@ beadListInit <- function(bead_dists) {
 #' @param x bead values
 #' @details The list is named 
 #' 
-#' @return Return a name list with elements sort_x, med, j, d, sum_d
+#' @return Return a named list with elements
 #' @export
 
 processBeadVector <- function(x) {
@@ -50,6 +50,6 @@ processBeadVector <- function(x) {
     sum_d <- sum(d)
 
     out <- list(sort_x, med, j, d, sum_d)
-    names(out) <- c("sort_x", "median", "j", "d", "sum_d")
+    names(out) <- c("x_sorted", "x_median", "j", "abs_dev_from_median", "sum_abs_dev_median")
     return(out)
 }
