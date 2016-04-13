@@ -24,3 +24,7 @@ vignettes/*.pdf
 # ignore package object files
 src/*.o
 src/*.so
+/.autotools
+/.cproject
+/.settings/
+/Debug/
