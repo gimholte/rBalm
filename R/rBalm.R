@@ -26,5 +26,5 @@ createMappingHelpers <- function(lform_output) {
     np <- lengths(lform_output$cnms)
     ntheta <- choose(np + 1, 2)
     thoff <- unname(c(0, cumsum(ntheta)))
-    list(component_p = np, theta_offsets = thoff, lambda_offsets = NULL)
+    list(component_p = np, offset_theta = thoff)
 }
