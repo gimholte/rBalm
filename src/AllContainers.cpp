@@ -19,13 +19,12 @@ namespace Rcpp {
     };
 };
 
-using namespace std;
 using namespace Rcpp;
 using namespace Eigen;
 typedef SparseMatrix<double> SpMat;
 
-bool checkListNames(const vector<string> & names, const List & ll);
-bool checkListNames(const vector<string> & names, const List & ll) {
+bool checkListNames(const std::vector<std::string> & names, const List & ll);
+bool checkListNames(const std::vector<std::string> & names, const List & ll) {
     bool all_in(true);
     for (size_t i = 0, n = names.size(); i < n; i++) {
         all_in &= ll.containsElementNamed(names[i].c_str());
@@ -35,15 +34,15 @@ bool checkListNames(const vector<string> & names, const List & ll) {
 
 ModelData::ModelData(SEXP r_bead_dist_list) {
     initializeListNames();
-    Rcpp::List bead_dist_list(r_bead_dist_list);
-    Rcpp::List::iterator in_iter, in_end = bead_dist_list.end();
+    List bead_dist_list(r_bead_dist_list);
+    List::iterator in_iter, in_end = bead_dist_list.end();
     for (in_iter = bead_dist_list.begin(); in_iter != in_end; ++in_iter) {
         checkListNames(r_names, *in_iter); // rely on implicit conversion to List.
         bead_vec.push_back(as<BeadDist>(*in_iter));
     }
     n_mfi = bead_vec.size();
     y.resize(n_mfi);
-    this->fillY();
+    fillY();
 };
 
 void ModelData::update(RngStream rng,
@@ -101,7 +100,6 @@ Latent::Latent(SEXP r_latent_term) {
         stop("Invalid number of latent response levels in latent model (must be 2)");
 
     Mt = latent_term["Zt"]; // implicit conversion
-    M = Mt.transpose();
     const int nmu = Mt.rows();
     const int nobs = Mt.cols();
     mu_g = VectorXd::Constant(nmu, 0.0);
@@ -113,8 +111,8 @@ Latent::Latent(SEXP r_latent_term) {
     sum_y_w = VectorXd::Constant(nmu, 0.0);
     sum_yy_w = VectorXd::Constant(nmu, 0.0);
     resid = VectorXd::Constant(nobs, 1.0);
-    fitted = M * mu_g;
-    weights = M * nu_g;
+    fitted = Mt.transpose() * mu_g;
+    weights = Mt.transpose() * nu_g;
 
     Rcout << "Initialized latent component... ";
 };
@@ -137,7 +135,7 @@ void Latent::updateNu(RngStream rng, const VectorXd & data_y,
         joint_rate = hypers.mfi_nu_rate + yss_w(j) / 2.0;
         nu_g(j) = RngStream_GA1(joint_shape, rng) / joint_rate;
     }
-    weights.noalias() = M * nu_g;
+    weights.noalias() = Mt.transpose() * nu_g;
     return;
 }
 
@@ -186,7 +184,7 @@ void Latent::updateMu(RngStream rng, const VectorXd & data_y,
             gamma(i) = 1.0;
         }
     }
-    fitted = M * mu_g;
+    fitted = Mt.transpose() * mu_g;
     return;
 }
 
@@ -272,58 +270,48 @@ Linear::Linear(SEXP r_linear_terms) {
     theta = as<VectorXd>(linear_terms["theta"]);
     Lambdat = as<SpMat>(linear_terms["Lambdat"]);
     Zt = as<SpMat>(linear_terms["Zt"]);
-    LtZt = Lambdat * Zt;
     List r_Ztlist = as<List>(linear_terms["Ztlist"]);
 
     b = VectorXd::Constant(Zt.rows(), 0.0);
     u = VectorXd::Constant(Zt.rows(), 0.0);
+    fitted = Zt.transpose() * b;
+
     I_p.resize(Zt.rows(), Zt.rows());
     I_p.setIdentity();
+    LtZt = Lambdat * Zt;
     Omega = LtZt * LtZt.transpose() + I_p;
 
-    helpers.solver.analyzePattern(Omega);
-    helpers.work_theta_vec = theta;
-    helpers.Lind = as<VectorXi>(linear_terms["Lind"]);
-    helpers.Lind -= VectorXi::Constant(helpers.Lind.rows(), 1);
-    helpers.b_offsets = as<VectorXi>(linear_terms["Gp"]);
-    helpers.theta_offsets = as<VectorXi>(linear_terms["theta_offsets"]);
-    helpers.component_p = as<VectorXi>(linear_terms["component_p"]);
-    helpers.lambda_offsets = VectorXi::Constant(helpers.component_p.rows() + 1, 0);
+    helpers.initialize(r_linear_terms, Omega, Lambdat);
 
+    VectorXi component_p = as<VectorXi>(linear_terms["component_p"]);
     int n_component = r_Ztlist.size();
-    Ztlist.resize(n_component);
-    helpers.lambdat_blocks.resize(n_component);
-
     for (int k = 0; k < n_component; k++) {
-        int within_theta_offset = helpers.theta_offsets(k);
-        int p = helpers.component_p(k);
-        components.push_back(CovarianceTemplate(within_theta_offset, p, 0.0));
+        cov_templates.push_back(CovarianceTemplate(helpers.getOffsetTheta(k),
+                component_p(k), 0.0));
+
         SEXP ztk = r_Ztlist[k];
-        Ztlist[k] = as<SparseMatrix<double> >(ztk);
-        helpers.lambdat_blocks[k] = Lambdat.block(offsetB(k), offsetB(k), nB(k), nB(k));
-        helpers.lambda_offsets[k + 1] = helpers.lambdat_blocks[k].nonZeros() +
-                helpers.lambda_offsets[k];
+        Ztlist.push_back(as<SpMat>(ztk));
     };
 
-    if (!checkBlocks(helpers.lambdat_blocks, Lambdat)) {
-        stop("Bad lambdat_blocks transfer in class Linear constructor");
+    if (!checkBlocks(helpers.block_lambdat, Lambdat)) {
+        stop("Bad lambdat_blocks transfer in Linear::Linear(SEXP) constructor");
     };
-    setFitted();
 };
 
 void Linear::update(RngStream rng, const VectorXd & latent_fitted,
         const VectorXd & mfi_obs_weights, const VectorXd & data_y,
         const Hypers & hypers) {
     LtZt = Lambdat * Zt;
-    helpers.work_ny_vec = LtZt * mfi_obs_weights.asDiagonal() * (data_y - latent_fitted);
+    work_y_vec = LtZt * mfi_obs_weights.asDiagonal() * (data_y - latent_fitted);
     Omega = LtZt * mfi_obs_weights.asDiagonal() * LtZt.transpose() + I_p;
     /* sample will be stored in u */
-    mvNormSim(rng, helpers.solver, Omega, helpers.work_ny_vec, u);
+    mvNormSim(rng, helpers.solver, Omega, work_y_vec, u);
+    /* update b and fitted */
     setFitted();
 
-    for (size_t i = 0; i < components.size(); ++i) {
+    for (size_t i = 0; i < cov_templates.size(); ++i) {
         updateComponent(rng, latent_fitted, mfi_obs_weights, data_y,
-                (int) i, Ztlist[i], helpers.lambdat_blocks[i], components[i]);
+                (int) i, Ztlist[i], helpers.block_lambdat[i], cov_templates[i]);
     };
     setFitted();
 }
@@ -334,36 +322,33 @@ void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
         const SparseMatrix<double> & zt_block,
         SparseMatrix<double> & lambdat_block,
         CovarianceTemplate & cvt) {
-    const int nb = nB(k);
-    const int b_offset = offsetB(k);
+    const int nb = helpers.nB(k);
+    const int b_offset = helpers.getOffsetB(k);
     MHValues mhv;
 
-    helpers.work_ny_vec.noalias() = data_y - latent_fitted - fitted;
+    work_y_vec.noalias() = data_y - latent_fitted - fitted;
 
-    const double cur_lik = thetaLikelihood(helpers.work_ny_vec, weights);
+    const double cur_lik = thetaLikelihood(work_y_vec, weights);
 
-    helpers.work_theta_vec = theta;
-    cvt.proposeTheta(rng, helpers.work_theta_vec, mhv);
+    work_theta_vec = theta;
+    cvt.proposeTheta(rng, work_theta_vec, mhv);
 
-    helpers.work_ny_vec.noalias() += zt_block.transpose() *
+    work_y_vec.noalias() += zt_block.transpose() *
             lambdat_block.transpose() * u.segment(b_offset, nb);
 
-    setLambdaHelperBlock(helpers.work_theta_vec, k);
-    helpers.work_ny_vec.noalias() -= zt_block.transpose() *
+    setLambdaHelperBlock(work_theta_vec, k);
+    work_y_vec.noalias() -= zt_block.transpose() *
             lambdat_block.transpose() * u.segment(b_offset, nb);
-    const double prop_lik = thetaLikelihood(helpers.work_ny_vec, weights);
+    const double prop_lik = thetaLikelihood(work_y_vec, weights);
 
     mhv.setCurLik(cur_lik);
     mhv.setPropLik(prop_lik);
-   // Rcout << exp(mhv.logA()) << " " << cur_lik << " " << prop_lik << std::endl;
-
 
     if (log(RngStream_RandU01(rng)) < mhv.logA()) {
         // accept proposal
-        theta.noalias() = helpers.work_theta_vec;
+        theta.noalias() = work_theta_vec;
         setLambdaBlock(theta, k);
         // update the internal state of the covariance template
-        // because its parameter representation is different
         cvt.acceptLastProposal();
     } else {
         // reject proposal
@@ -375,23 +360,24 @@ void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
 
 void Linear::setLambdaHelperBlock(VectorXd & new_theta, int block_idx) {
     // use Lind to fill the block of lambdat at block_idx with values in new_theta
-    const int offset = offsetLambda(block_idx);
-    const int n_theta = nLambda(block_idx);
-    if (n_theta != helpers.lambdat_blocks[block_idx].nonZeros()) {
+    const int offset = helpers.getOffsetLambda(block_idx);
+    const int n_theta = helpers.nLambda(block_idx);
+    if (n_theta != helpers.numBlockNonZeros(block_idx)) {
         stop("nonzeros in lamdbat_block do not match replacement length");
     }
+    double* val_ptr = helpers.getBlockValuePtr(block_idx);
     for (int j = 0, i = offset; j < + n_theta; i++, j++) {
-        *(helpers.lambdat_blocks[block_idx].valuePtr() + j) = new_theta(Lind(i));
+        *(val_ptr + j) = new_theta(helpers.getLind(i));
     }
     return;
 }
 
 void Linear::setLambdaBlock(VectorXd & new_theta, int block_idx) {
     // use Lind to fill the block of lambdat starting at block_idx with values in new_theta
-    const int offset = offsetLambda(block_idx);
-    const int n_theta = nLambda(block_idx);
+    const int offset = helpers.getOffsetLambda(block_idx);
+    const int n_theta = helpers.nLambda(block_idx);
     for (int i = offset; i < offset + n_theta; ++i) {
-        *(Lambdat.valuePtr() + i) = new_theta(Lind(i));
+        *(Lambdat.valuePtr() + i) = new_theta(helpers.getLind(i));
     }
     return;
 }
@@ -434,8 +420,9 @@ double BeadDist::computeSumAbsDev(const double x) {
             break;
         }
     }
-    const int istart = (x >= x_median) ? j : j - 1;
-    for (int i = istart; i != k + k_increment; i += k_increment) {
+    for (int i = (x >= x_median) ? j : j - 1;
+            i != k + k_increment;
+            i += k_increment) {
         deduct -= 2.0 * abs_dev_from_median(i);
     }
     return sum_abs_dev_median +
@@ -459,19 +446,20 @@ void BeadDist::updateLaplacePrecision(RngStream rng,
 
 void BeadDist::updateLaplaceMu(RngStream rng, const double mu_prior_mean,
         const double mu_prior_prec) {
+    MHValues mhv;
     const double prop_mu = RngStream_N01(rng) * mcmc_scale_mult + mu;
     const double prop_smd = computeSumAbsDev(prop_mu);
-    const double prop_lik = computeLaplaceLikelihood(prop_smd);
-    const double prop_prior = -.5 * pow(prop_mu - mu_prior_mean, 2) * mu_prior_prec;
 
-    const double cur_lik = computeLaplaceLikelihood(sum_abs_dev_cur);
-    const double cur_prior = -.5 * pow(mu - mu_prior_mean, 2) * mu_prior_prec;
+    mhv.setPropLik(computeLaplaceLikelihood(prop_smd));
+    mhv.setPropPrior(-.5 * pow(prop_mu - mu_prior_mean, 2) * mu_prior_prec);
 
-    const double joint_prop = prop_lik + prop_prior;
-    const double joint_cur = cur_lik + cur_prior;
+    mhv.setCurLik(computeLaplaceLikelihood(sum_abs_dev_cur));
+    mhv.setCurPrior(-.5 * pow(mu - mu_prior_mean, 2) * mu_prior_prec);
+    // symmetric proposal so set these to zero (log 1).
+    mhv.setPropToCur(0.0);
+    mhv.setCurToProp(0.0);
 
-    const double loga = joint_prop - joint_cur;
-    if (log(RngStream_RandU01(rng)) <= loga) {
+    if (log(RngStream_RandU01(rng)) <= mhv.logA()) {
         mu = prop_mu;
         sum_abs_dev_cur = prop_smd;
     }
@@ -479,11 +467,11 @@ void BeadDist::updateLaplaceMu(RngStream rng, const double mu_prior_mean,
 }
 
 void mvNormSim(RngStream rng, Eigen::SimplicialLLT<SpMat> & solver,
-        const SpMat & omega, const Eigen::VectorXd & tau, Eigen::VectorXd & sample) {
-    const size_t n = sample.size();
-    for (size_t i = 0; i < n; i++) {
+        const SpMat & omega, const Eigen::VectorXd & tau, Eigen::VectorXd & sample)
+{
+    for (size_t i = 0, n = sample.rows(); i < n; i++)
         *(sample.data() + i) = RngStream_N01(rng);
-    }
+
     solver.factorize(omega);
     solver.matrixU().solveInPlace(sample);
     sample.noalias() += solver.solve(tau);
@@ -492,14 +480,14 @@ void mvNormSim(RngStream rng, Eigen::SimplicialLLT<SpMat> & solver,
 CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_) :
     within_theta_offset_val(offset_val_),
     p(p_),
+    lower_tri(p_ * (p_ + 1) / 2),
     rho(rho_),
     prop_rho(rho_),
     sigma(p_),
     prop_sigma(p_),
     D(p_, p_),
     L_cor(p_, p_),
-    DL(p_, p_),
-    lower_tri(p_ * (p_ + 1) / 2)
+    DL(p_, p_)
 {
     sigma.fill(1.0);
     fillCholeskyDecomp();
@@ -513,8 +501,8 @@ void CovarianceTemplate::proposeTheta(RngStream rng, Eigen::VectorXd & theta,
     // temporarily fill the internal state with proposal values
     sigma.fill(prop_sig);
     prop_sigma.fill(prop_sig);
-    fillCholeskyDecomp();
     prop_rho = rho;
+    fillCholeskyDecomp();
 
     // input new theta value
     fillTheta(theta);

@@ -124,7 +124,6 @@ class Latent {
 
 public:
     Eigen::SparseMatrix<double> Mt;
-    Eigen::SparseMatrix<double> M;
     Eigen::VectorXd gamma;
     Eigen::VectorXd mu_g;
     Eigen::VectorXd nu_g;
@@ -151,6 +150,19 @@ public:
 
 class MHValues {
 public:
+    MHValues() :
+        prop_to_cur(0.0),
+        cur_to_prop(0.0),
+        prop_prior(0.0),
+        cur_prior(0.0),
+        prop_lik(0.0),
+        cur_lik(0.0) {
+    }
+        double logA() {
+        return (prop_lik + prop_prior + prop_to_cur) -
+                (cur_lik + cur_prior + cur_to_prop);
+    }
+
     void setCurLik(double curLik) {
         cur_lik = curLik;
     }
@@ -175,19 +187,6 @@ public:
         prop_to_cur = propToCur;
     }
 
-    double logA() {
-        return (prop_lik + prop_prior + prop_to_cur) -
-                (cur_lik + cur_prior + cur_to_prop);
-    }
-
-    MHValues() :
-        prop_to_cur(0.0),
-        cur_to_prop(0.0),
-        prop_prior(0.0),
-        cur_prior(0.0),
-        prop_lik(0.0),
-        cur_lik(0.0) {
-    }
     double getCurLik() const {
         return cur_lik;
     }
@@ -211,8 +210,6 @@ public:
     double getPropToCur() const {
         return prop_to_cur;
     }
-
-    ;
 
 private:
     double prop_to_cur;
@@ -277,19 +274,110 @@ private:
 };
 
 
-struct LinearHelpers {
-    Eigen::VectorXd work_ny_vec;
-    Eigen::VectorXd work_theta_vec;
-    Eigen::VectorXd work_nb_vec;
-
-    Eigen::VectorXi theta_offsets;
-    Eigen::VectorXi lambda_offsets;
-    Eigen::VectorXi b_offsets;
+class LinearHelpers {
+private:
+    Eigen::VectorXi offset_b;
+    Eigen::VectorXi offset_theta;
+    Eigen::VectorXi offset_lambda;
     Eigen::VectorXi Lind;
-    Eigen::VectorXi component_p;
 
+    void setOffsetB(SEXP Gp_) {
+        offset_b = Rcpp::as<Eigen::VectorXi>(Gp_);
+    }
+
+    void setOffsetTheta(SEXP ot_) {
+        offset_theta = Rcpp::as<Eigen::VectorXi>(ot_);
+    }
+
+    void setOffsetLambda(const Eigen::SparseMatrix<double> & l_init,
+            const Eigen::VectorXi & offset_b__) {
+        int i, osb, nb, n;
+        Eigen::SparseMatrix<double> tmp;
+        for (i = 0, offset_lambda(0) = 0, n = offset_b__.rows() - 1; i < n; ++i) {
+            osb = offset_b__(i);
+            nb = offset_b__(i + 1) - offset_b__(i);
+            tmp = l_init.block(osb, osb, nb, nb);
+            offset_lambda(i + 1) = tmp.nonZeros() + offset_lambda(i);
+        }
+    }
+
+    void setLambdaBlocks(const Eigen::SparseMatrix<double> l_init,
+            const Eigen::VectorXi & offset_b__) {
+        int nblock = offset_b__.rows() - 1;
+        if (nblock < 1)
+            return;
+        int nb, osb;
+        Eigen::SparseMatrix<double> tmp;
+        block_lambdat.erase(block_lambdat.begin(), block_lambdat.end());
+        for (int i = 0; i < nblock; ++i) {
+            nb = offset_b__(i + 1) - offset_b__(i);
+            osb = offset_b__(i);
+            tmp = l_init.block(osb, osb, nb, nb);
+            block_lambdat.push_back(tmp);
+        }
+        return;
+    }
+
+public:
     Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > solver;
-    std::vector<Eigen::SparseMatrix<double> > lambdat_blocks;
+    std::vector<Eigen::SparseMatrix<double> > block_lambdat;
+
+    void initialize(SEXP linear_terms_, const Eigen::SparseMatrix<double> & solver_init,
+            const Eigen::SparseMatrix<double> & lambda_init) {
+        Rcpp::List linear_terms(linear_terms_);
+        setOffsetB(linear_terms["Gp"]);
+        setOffsetTheta(linear_terms["offset_theta"]);
+        setOffsetLambda(lambda_init, offset_b);
+        setLind(linear_terms["Lind"]);
+        setLambdaBlocks(lambda_init, offset_b);
+        solver.analyzePattern(solver_init);
+    }
+
+
+    int nB(int k) const {
+        return offset_b(k + 1) - offset_b(k);
+    }
+
+    int getOffsetB(int k) const {
+        return offset_b(k);
+    }
+
+    int nTheta(int k) const {
+        return offset_theta(k + 1) - offset_theta(k);
+    }
+
+    int getOffsetTheta(int k) const {
+        return offset_theta(k);
+    }
+
+    void setLind(SEXP Lind_) {
+        Lind = Rcpp::as<Eigen::VectorXi>(Lind_);
+        Lind.array() -= 1;
+    }
+
+    int getLind(int k) const {
+        return Lind(k);
+    }
+
+    int numBlocks() const {
+        return (int) block_lambdat.size();
+    }
+
+    double* getBlockValuePtr(int block_idx) {
+        return block_lambdat[block_idx].valuePtr();
+    }
+
+    int numBlockNonZeros(int block_idx) const {
+        return block_lambdat[block_idx].nonZeros();
+    }
+
+    int getOffsetLambda(int k) const {
+        return offset_lambda(k);
+    }
+
+    int nLambda(int k) const {
+        return offset_lambda(k + 1) - offset_lambda(k);
+    }
 };
 
 class Linear {
@@ -298,6 +386,9 @@ class Linear {
         r_names.push_back("Zt");
         r_names.push_back("cnms");
         r_names.push_back("Lambdat");
+        r_names.push_back("Gp");
+        r_names.push_back("component_p");
+        r_names.push_back("Lind");
         return;
     };
 
@@ -305,7 +396,7 @@ public:
     // parameters
     Eigen::VectorXd theta;
     Eigen::VectorXd b, u;
-    std::vector<CovarianceTemplate> components;
+    std::vector<CovarianceTemplate> cov_templates;
 
     // fundamental matrices
     std::vector<Eigen::SparseMatrix<double> > Ztlist;
@@ -313,6 +404,7 @@ public:
 
     // helpers for computation and avoiding ubiquitous temporaries
     LinearHelpers helpers;
+    Eigen::VectorXd work_y_vec, work_theta_vec;
 
     // convenient things
     Eigen::VectorXd fitted;
@@ -330,39 +422,9 @@ public:
             Eigen::SparseMatrix<double> & lambdat_block,
             CovarianceTemplate & cvt);
 
-    inline void setFitted() {
+    void setFitted() {
         b = Lambdat.transpose() * u;
         fitted = Zt.transpose() * b;
-    }
-
-    inline int nB(int k) const {
-        if (k > (helpers.b_offsets.rows() - 1))
-            Rcpp::stop("index error in Linear::componentNb method");
-        return helpers.b_offsets(k + 1) - helpers.b_offsets(k);
-    }
-
-    inline int offsetB(int k) const {
-        if (k > (helpers.b_offsets.rows() - 1))
-            Rcpp::stop("index error in Linear::offsetB method");
-        return helpers.b_offsets(k);
-    }
-
-    inline int offsetLambda(int k) const {
-        if (k > (helpers.lambda_offsets.rows() - 1))
-            Rcpp::stop("index error in Linear::offsetLambda method");
-        return helpers.lambda_offsets(k);
-    }
-
-    inline int nLambda(int k) const {
-        if (k > (helpers.lambda_offsets.rows() - 1))
-            Rcpp::stop("index error in Linear::nLambda method");
-        return offsetLambda(k + 1) - offsetLambda(k);
-    }
-
-    inline int Lind(int k) const {
-        if (k > helpers.Lind.rows())
-            Rcpp::stop("invalid index in Linear::Lind method");
-        return helpers.Lind[k];
     }
 
     inline bool checkBlocks(const std::vector<Eigen::SparseMatrix<double> > blocks,
