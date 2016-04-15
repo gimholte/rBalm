@@ -23,7 +23,8 @@ test_that("LinearHelpers member functions initialize", {
         })
 
 test_that("Theta values update properly", {
-            small_test_path <- system.file("extdata", "small_test.RData", package = "rBalm")            
+            small_test_path <- system.file("extdata", "small_test.RData", package = "rBalm")      
+            load(small_test_path)
             lform <- lFormula(mfi ~ (0 + plate | subject) + (1 |treatment:subject),
                     data = small_mfi)$reTrms
             helpers <- createMappingHelpers(lform)
