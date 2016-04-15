@@ -21,7 +21,9 @@ namespace Rcpp {
 
 using namespace Rcpp;
 using namespace Eigen;
+
 typedef SparseMatrix<double> SpMat;
+typedef MappedSparseMatrix<double> MSpMat;
 
 bool checkListNames(const std::vector<std::string> & names, const List & ll);
 bool checkListNames(const std::vector<std::string> & names, const List & ll) {
@@ -313,7 +315,6 @@ void Linear::update(RngStream rng, const VectorXd & latent_fitted,
         updateComponent(rng, latent_fitted, mfi_obs_weights, data_y,
                 (int) i, Ztlist[i], helpers.block_lambdat[i], cov_templates[i]);
     };
-    setFitted();
 }
 
 void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
@@ -350,6 +351,8 @@ void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
         setLambdaBlock(theta, k);
         // update the internal state of the covariance template
         cvt.acceptLastProposal();
+        // update fitted values with new
+        setFitted();
     } else {
         // reject proposal
         // reset the lambda helper
@@ -365,9 +368,9 @@ void Linear::setLambdaHelperBlock(VectorXd & new_theta, int block_idx) {
     if (n_theta != helpers.numBlockNonZeros(block_idx)) {
         stop("nonzeros in lamdbat_block do not match replacement length");
     }
-    double* val_ptr = helpers.getBlockValuePtr(block_idx);
-    for (int j = 0, i = offset; j < + n_theta; i++, j++) {
-        *(val_ptr + j) = new_theta(helpers.getLind(i));
+    double* block_ptr = helpers.getBlockValuePtr(block_idx);
+    for (int j = 0, i = offset; j < n_theta; ++i, ++j) {
+        *(block_ptr + j) = new_theta(helpers.getLind(i));
     }
     return;
 }
@@ -386,7 +389,7 @@ double thetaLikelihood(const VectorXd & delta, const VectorXd & weights) {
     return -.5 * delta.cwiseProduct(weights).dot(delta);
 }
 
-BeadDist::BeadDist(const Rcpp::List & bead_dist) :
+BeadDist::BeadDist(const List & bead_dist) :
                         x_sorted(as<NumericVector>(bead_dist["x_sorted"])),
                         abs_dev_from_median(as<NumericVector>(bead_dist["abs_dev_from_median"])),
                         j(as<int>(bead_dist["j"])),
@@ -466,8 +469,8 @@ void BeadDist::updateLaplaceMu(RngStream rng, const double mu_prior_mean,
     return;
 }
 
-void mvNormSim(RngStream rng, Eigen::SimplicialLLT<SpMat> & solver,
-        const SpMat & omega, const Eigen::VectorXd & tau, Eigen::VectorXd & sample)
+void mvNormSim(RngStream rng, SimplicialLLT<SpMat> & solver,
+        const SpMat & omega, const VectorXd & tau, VectorXd & sample)
 {
     for (size_t i = 0, n = sample.rows(); i < n; i++)
         *(sample.data() + i) = RngStream_N01(rng);
@@ -493,7 +496,7 @@ CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_) :
     fillCholeskyDecomp();
 };
 
-void CovarianceTemplate::proposeTheta(RngStream rng, Eigen::VectorXd & theta,
+void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         MHValues & mhv) {
     double cur_sig = sigma(0);
     double prop_sig = exp(.5 * (RngStream_RandU01(rng) - .5)) * cur_sig;

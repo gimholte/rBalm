@@ -233,7 +233,7 @@ public:
 
     void acceptLastProposal();
 
-    void fillTheta(Eigen::VectorXd & theta) {
+    void fillTheta(Eigen::VectorXd & theta) const {
         int t_ind, n = lower_tri.rows();
         for (int i = 0; i < n; i++) {
             t_ind = getThetaOffset() + i;
@@ -251,17 +251,30 @@ public:
     };
 
     Eigen::MatrixXd getDL() const {
-        Eigen::MatrixXd newDL = DL;
         return DL;
     }
 
-    void setSigma(Eigen::VectorXd & new_sig) {
-        if (new_sig.rows() != sigma.rows()) {
+    void setSigma(const Eigen::VectorXd & new_sig) {
+        if (new_sig.size() != sigma.size()) {
             Rcpp::stop("invalid length of new sigma values");
         }
         sigma = new_sig;
         fillCholeskyDecomp();
     }
+
+    Eigen::VectorXd getSigma() const {
+        return sigma;
+    }
+
+    void setRho(const double new_rho) {
+        rho = new_rho;
+        fillCholeskyDecomp();
+    }
+
+    double getRho() const {
+        return rho;
+    }
+
 
 private:
     double rho, prop_rho;
@@ -293,6 +306,7 @@ private:
             const Eigen::VectorXi & offset_b__) {
         int i, osb, nb, n;
         Eigen::SparseMatrix<double> tmp;
+        offset_lambda.resizeLike(offset_b__);
         for (i = 0, offset_lambda(0) = 0, n = offset_b__.rows() - 1; i < n; ++i) {
             osb = offset_b__(i);
             nb = offset_b__(i + 1) - offset_b__(i);
@@ -306,13 +320,14 @@ private:
         int nblock = offset_b__.rows() - 1;
         if (nblock < 1)
             return;
+
         int nb, osb;
-        Eigen::SparseMatrix<double> tmp;
-        block_lambdat.erase(block_lambdat.begin(), block_lambdat.end());
-        for (int i = 0; i < nblock; ++i) {
-            nb = offset_b__(i + 1) - offset_b__(i);
-            osb = offset_b__(i);
-            tmp = l_init.block(osb, osb, nb, nb);
+        block_lambdat.clear();
+        block_lambdat.reserve(nblock);
+        for (int k = 0; k < nblock; ++k) {
+            nb = offset_b__(k + 1) - offset_b__(k);
+            osb = offset_b__(k);
+            Eigen::SparseMatrix<double> tmp = l_init.block(osb, osb, nb, nb);
             block_lambdat.push_back(tmp);
         }
         return;
@@ -332,7 +347,6 @@ public:
         setLambdaBlocks(lambda_init, offset_b);
         solver.analyzePattern(solver_init);
     }
-
 
     int nB(int k) const {
         return offset_b(k + 1) - offset_b(k);
@@ -375,6 +389,14 @@ public:
         return offset_lambda(k);
     }
 
+    Eigen::VectorXi getOffsetLambda() const {
+        return offset_lambda;
+    }
+
+    Eigen::SparseMatrix<double> getLambdaBlock(int block_idx) {
+        return block_lambdat[block_idx];
+    }
+
     int nLambda(int k) const {
         return offset_lambda(k + 1) - offset_lambda(k);
     }
@@ -400,7 +422,7 @@ public:
 
     // fundamental matrices
     std::vector<Eigen::SparseMatrix<double> > Ztlist;
-    Eigen::SparseMatrix<double> Lambdat, Zt, Omega, I_p, LtZt;
+    Eigen::SparseMatrix<double> Zt, Omega, I_p, LtZt, Lambdat;
 
     // helpers for computation and avoiding ubiquitous temporaries
     LinearHelpers helpers;
@@ -454,6 +476,7 @@ public:
     }
 
     void setLambdaHelperBlock(Eigen::VectorXd & new_theta, int block_idx);
+
     void setLambdaBlock(Eigen::VectorXd & new_theta, int block_idx);
 };
 

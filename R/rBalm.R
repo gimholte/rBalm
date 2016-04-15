@@ -7,8 +7,9 @@
 #' 
 #' @return some output
 #' @export 
+#' @import lme4
+#' @import Matrix
 #' @useDynLib rBalm
-
 rBalm <- function(data, n_iter, n_burn) {
     d_list <- list(x = rnorm(100))
     .Call("rBalmMcmc", d_list, PACKAGE = "rBalm")
@@ -21,7 +22,6 @@ rBalm <- function(data, n_iter, n_burn) {
 #' @param lform_output
 #' @return list
 #' @export 
-
 createMappingHelpers <- function(lform_output) {
     np <- lengths(lform_output$cnms)
     ntheta <- choose(np + 1, 2)

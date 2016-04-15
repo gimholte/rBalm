@@ -10,7 +10,7 @@ processBeadVector(x)
 \item{x}{bead values}
 }
 \value{
-Return a name list with elements sort_x, med, j, d, sum_d
+Return a named list with elements
 }
 \description{
 Summary statistics and various quantities 

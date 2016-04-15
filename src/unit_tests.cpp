@@ -18,6 +18,77 @@
 using namespace Eigen;
 using namespace Rcpp;
 
+typedef MappedSparseMatrix<double> MSpMat;
+typedef SparseMatrix<double> SpMat;
+
+// [[Rcpp::depends(RcppEigen)]]
+// [[Rcpp::export]]
+Rcpp::List testLinearHelpersInit(SEXP retrms_, Eigen::VectorXd tau) {
+    List retrms(retrms_);
+    MSpMat Zt(retrms["Zt"]);
+    SpMat Lt(retrms["Lambdat"]);
+    SpMat Omega, Ip;
+    Ip.resize(Zt.rows(), Zt.rows());
+    Ip.setIdentity();
+    Omega = Lt * Zt * Zt.transpose() * Lt.transpose() + Ip;
+    LinearHelpers helpers;
+    helpers.initialize(retrms_, Omega, Lt);
+
+    // record the number of blocks;
+    int nblocks = helpers.numBlocks();
+
+    // record number of block nonzero values;
+    VectorXi block_nonzeros(nblocks);
+    for (int i = 0; i < nblocks; i++)
+        block_nonzeros(i) = helpers.numBlockNonZeros(i);
+
+    // record all lambdat blocks
+    std::vector<SpMat> block_list;
+    for (int i = 0; i < nblocks; i++)
+        block_list.push_back(helpers.getLambdaBlock(i));
+
+    // use solver to check it works;
+    helpers.solver.factorize(Omega);
+    return List::create(_["blocks"] = wrap(block_list),
+            _["block_nonZeros"] = wrap(block_nonzeros),
+            _["offset_lambda"] = wrap(helpers.getOffsetLambda()),
+            _["helper_blocks"] = wrap(helpers.block_lambdat),
+            _["tau_solve"] = helpers.solver.solve(tau));;
+}
+
+// [[Rcpp::depends(RcppEigen)]]
+// [[Rcpp::export]]
+Rcpp::List testLinearThetaFilling(SEXP retrms_) {
+    Linear lin(retrms_);
+    int k = lin.helpers.numBlocks();
+    if (k < 2) {
+        return List::create(_[""] = R_NilValue);
+    }
+    VectorXd new_sig = lin.cov_templates[0].getSigma();
+    new_sig.fill(2.0);
+    lin.cov_templates[0].setSigma(new_sig);
+    lin.cov_templates[0].fillTheta(lin.theta);
+    lin.setLambdaBlock(lin.theta, 0);
+    lin.setLambdaHelperBlock(lin.theta, 0);
+    new_sig = lin.cov_templates[1].getSigma();
+    new_sig.fill(3.0);
+    double new_rho = .5;
+
+    lin.cov_templates[1].setRho(new_rho);
+    lin.cov_templates[1].setSigma(new_sig);
+    lin.cov_templates[1].fillTheta(lin.theta);
+    lin.setLambdaBlock(lin.theta, 1);
+    lin.setLambdaHelperBlock(lin.theta, 1);
+
+    return List::create(_["theta"] = lin.theta,
+            _["template_L0"] = lin.cov_templates[0].getDL(),
+            _["template_L1"] = lin.cov_templates[1].getDL(),
+            _["Lambdat"] = lin.Lambdat,
+            _["Lambdat_block0"] = lin.helpers.getLambdaBlock(0),
+            _["Lambdat_block1"] = lin.helpers.getLambdaBlock(1));
+}
+
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
 SEXP rBalmTestNuPriors() {
     Hypers hypers;
@@ -34,20 +105,21 @@ SEXP rBalmTestNuPriors() {
     return wrap(out);
 }
 
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-SEXP beadListTest(SEXP x_bead_list, SEXP x_eval) {
+NumericVector beadListTest(SEXP x_bead_list, NumericVector x) {
     ModelData beads(x_bead_list);
-    NumericVector x(x_eval);
     int n = x.size();
     NumericVector sad(n);
     for (int i = 0; i < n; i++) {
         sad(i) = beads.bead_vec[i].computeSumAbsDev(x(i));
     }
-    return wrap(sad);
+    return sad;
 }
 
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-SEXP beadListMcmcTest(SEXP r_bead_list, SEXP r_chain_ctl) {
+Rcpp::List beadListMcmcTest(SEXP r_bead_list, SEXP r_chain_ctl) {
     ModelData beads(r_bead_list);
     ChainParameters cpars(r_chain_ctl);
     int n_mfi = beads.n_mfi;
@@ -79,8 +151,9 @@ SEXP beadListMcmcTest(SEXP r_bead_list, SEXP r_chain_ctl) {
             _["prec"] = wrap(out_prec.transpose()));
 }
 
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-SEXP testSolver(SEXP r_linear_terms) {
+Rcpp::List testSolver(SEXP r_linear_terms) {
     Linear linear(r_linear_terms);
     linear.LtZt = linear.Lambdat * linear.Zt;
     linear.Omega = linear.LtZt * linear.LtZt.transpose() + linear.I_p;
@@ -93,18 +166,14 @@ SEXP testSolver(SEXP r_linear_terms) {
             _["om"] = wrap(linear.Omega));
 }
 
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-SEXP testMvNormSim(SEXP omega_, SEXP tau_, SEXP n_) {
-    const SparseMatrix<double> omega(as<SparseMatrix<double> >(omega_));
-    const VectorXd tau(as<VectorXd>(tau_));
-    int n(as<int>(n_));
-
+Eigen::MatrixXd testMvNormSim(const Eigen::SparseMatrix<double> omega,
+        Eigen::VectorXd tau, int n) {
     if (omega.cols() != omega.rows())
-        return R_NilValue;
-
+        stop("");
     if (omega.cols() != tau.size())
-        return R_NilValue;
-
+        stop("");
     MatrixXd output(omega.rows(), n);
     VectorXd sample(omega.rows());
 
@@ -115,9 +184,10 @@ SEXP testMvNormSim(SEXP omega_, SEXP tau_, SEXP n_) {
         mvNormSim(rng, solver, omega, tau, sample);
         output.col(i) = sample;
     }
-    return wrap(output);
+    return output;
 }
 
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
 SEXP testCholeskyFill() {
     CovarianceTemplate t1(0, 5, .25);
