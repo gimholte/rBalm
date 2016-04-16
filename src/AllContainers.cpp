@@ -1,6 +1,6 @@
-#include <vector>
-#include <map>
-#include <string>
+//#include <vector>
+//#include <map>
+//#include <string>
 #include <RcppEigenForward.h>
 #include "RngStream.h"
 #include "Rv.h"
@@ -25,7 +25,6 @@ using namespace Eigen;
 typedef SparseMatrix<double> SpMat;
 typedef MappedSparseMatrix<double> MSpMat;
 
-bool checkListNames(const std::vector<std::string> & names, const List & ll);
 bool checkListNames(const std::vector<std::string> & names, const List & ll) {
     bool all_in(true);
     for (size_t i = 0, n = names.size(); i < n; i++) {
@@ -190,76 +189,102 @@ void Latent::updateMu(RngStream rng, const VectorXd & data_y,
     return;
 }
 
-Hypers::Hypers(SEXP r_fixed_hypers) {
-        initializeListNames();  //should only be called once.
-        List fixed_hypers(r_fixed_hypers);
-        bool is_ok = checkListNames(r_names, fixed_hypers);
-        if (!is_ok) {
-            stop("Missing required names for fixed hyper-parameters from R.");
-        }
-        gam0 = as<double>(fixed_hypers["gam0"]);
-        gam1 = as<double>(fixed_hypers["gam1"]);
-        gam01 = as<double>(fixed_hypers["gam01"]);
-        lambda_a_prior = as<double>(fixed_hypers["lambda_a_prior"]);
-        lambda_b_prior = as<double>(fixed_hypers["lambda_b_prior"]);
-        bead_precision_shape = as<double>(fixed_hypers["bead_precision_shape"]);
-        bead_precision_rate = as<double>(fixed_hypers["bead_precision_rate"]);
-
-        p = .05;
-        mfi_nu_shape = .5;
-        mfi_nu_rate = .5;
-        return;
-}
+Hypers::Hypers(SEXP r_fixed_hypers) :
+        names_initialized(false),
+        r_names(0),
+        fixed_hypers(initializeHypersList(r_fixed_hypers)),
+        gam0(as<double>(fixed_hypers["gam0"])),
+        gam1(as<double>(fixed_hypers["gam1"])),
+        gam01(as<double>(fixed_hypers["gam01"])),
+        lambda_a_prior(as<double>(fixed_hypers["lambda_a_prior"])),
+        lambda_b_prior(as<double>(fixed_hypers["lambda_b_prior"])),
+        bead_precision_rate(as<double>(fixed_hypers["bead_precision_rate"])),
+        bead_precision_shape(as<double>(fixed_hypers["bead_precision_shape"])),
+        p_a_prior(as<double>(fixed_hypers["p_a_prior"])),
+        p_b_prior(as<double>(fixed_hypers["p_b_prior"])),
+        p(.05),
+        mfi_nu_shape(.5),
+        mfi_nu_rate(.5),
+        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) { };
 
 Hypers::Hypers() :
-    mfi_nu_shape(.5),
-    mfi_nu_rate(.5),
-    p(.05),
-    gam0(.1),
-    gam1(.1),
-    gam01(.1),
-    lambda_a_prior(.05),
-    lambda_b_prior(.05),
-    bead_precision_rate(1.0),
-    bead_precision_shape(1.0) {};
+        names_initialized(true),
+        r_names(0),
+        fixed_hypers(0),
+        gam0(.1),
+        gam1(.1),
+        gam01(.1),
+        lambda_a_prior(.05),
+        lambda_b_prior(.05),
+        bead_precision_rate(1.0),
+        bead_precision_shape(1.0),
+        p_a_prior(.05),
+        p_b_prior(.5),
+        p(.05),
+        mfi_nu_shape(.5),
+        mfi_nu_rate(.5),
+        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) {};
 
-void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
-    const int n_nu = mfi_precision.size();
-    double sum_log_nu(0.0);
-    for (int i = 0; i < n_nu; i++) {
-        sum_log_nu += log(mfi_precision(i));
+void ShapeDensity::setSummaryStatistics(const VectorXd & nu_vec) {
+    n = nu_vec.rows();
+    sum_nu = nu_vec.sum();
+    sum_log_nu = 0.0;
+    for (int i = 0; i < n; i++) {
+        sum_log_nu += log(nu_vec(i));
     }
-    const double sum_nu = mfi_precision.sum();
-    const double z = integratedPrecisionConditional(mfi_nu_shape, n_nu,
-            sum_nu, sum_log_nu) - RngStream_GA1(1.0, rng);
-    /* z is the y-value for horizontal slice */
-    double w(5.0);
-    double R(mfi_nu_shape + w);
-    double L(mfi_nu_shape - w);
-    L = fmax(0.0, L);
-    double g_R = integratedPrecisionConditional(R, n_nu, sum_nu, sum_log_nu);
-    double g_L = integratedPrecisionConditional(L, n_nu, sum_nu, sum_log_nu);
+    return;
+};
 
+template <typename Func>
+double unimodalSliceSampler(RngStream rng, const double x_init,
+        const double x_upper, const double x_lower,
+        double & w, Func & log_density)
+{
+    /* z is the y-value for horizontal slice */
+    const double z = log_density(x_init) - RngStream_GA1(1.0, rng);
+    double R(fmin(x_upper, x_init + w));
+    double L(fmax(x_lower, x_init - w));
+    double g_R = log_density(R);
+    double g_L = log_density(L);
+
+    // grow interval endpoints until we find upper and lower endpoints
+    // s.t. G(R) < z and G(L) < z. Assumes unimodal density.
     while (g_R > z) {
         R += w;
-        g_R = integratedPrecisionConditional(R, n_nu, sum_nu, sum_log_nu);
+        R = fmin(R, x_upper);
+        g_R = log_density(R);
     }
 
     while (g_L > z) {
         L -= w;
-        L = fmax(0.0, L);
-        g_L = integratedPrecisionConditional(L, n_nu, sum_nu, sum_log_nu);
+        L = fmax(L, x_lower);
+        g_L = log_density(L);
     }
-    double s = RngStream_UnifAB(L, R, rng);
-    while (integratedPrecisionConditional(s, n_nu, sum_nu, sum_log_nu) < z) {
-        if (s > mfi_nu_shape)
+
+    // sample [L, R] interval, shrinking L,R if
+    // a sample X has density G(X) < z
+    double s;
+    while (s = RngStream_UnifAB(L, R, rng), log_density(s) < z) {
+        if (s > x_init)
             R = s;
         else
             L = s;
-        s = RngStream_UnifAB(L, R, rng);
     }
-    mfi_nu_shape = s;
-    mfi_nu_rate = RngStream_GA1(n_nu * mfi_nu_shape + 1.0, rng) / (sum_nu + lambda_b_prior);
+    w = fmax((R - L) / 2.0, .1);
+    return s;
+}
+
+void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
+    shape_sampler.setSummaryStatistics(mfi_precision);
+    double tmp_w = shape_sampler.getW();
+    double new_mfi_nu_shape = unimodalSliceSampler(rng, mfi_nu_shape,
+            shape_sampler.getUpper(), shape_sampler.getLower(), tmp_w,
+            shape_sampler);
+    shape_sampler.updateW(tmp_w);
+    mfi_nu_shape = new_mfi_nu_shape;
+    const int n = shape_sampler.getN();
+    const double sum_nu = shape_sampler.getSumNu();
+    mfi_nu_rate = RngStream_GA1(1.0 + n * mfi_nu_shape, rng) / (sum_nu + lambda_b_prior);
 }
 
 Linear::Linear(SEXP r_linear_terms) {

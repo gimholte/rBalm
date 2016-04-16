@@ -1,6 +1,8 @@
 #ifndef ALLCONTAINTERS_H
 #define ALLCONTAINTERS_H
 
+bool checkListNames(const std::vector<std::string> & names, const Rcpp::List & ll);
+
 class BeadDist {
     Rcpp::NumericVector x_sorted;
     Rcpp::NumericVector abs_dev_from_median;
@@ -480,10 +482,96 @@ public:
     void setLambdaBlock(Eigen::VectorXd & new_theta, int block_idx);
 };
 
+/*
+ * Functor class for evaluating the marginal density of shape parameter among
+ * n gamma(shape, rate) distributed variables, where shape/rate have exponential
+ * priors
+ */
+
+class ShapeDensity {
+private:
+    // summary statistics
+    double sum_nu;
+    double sum_log_nu;
+    int n;
+
+    // slice sampler stuff;
+    double w;
+    const double exponential_weight;
+    const double lower;
+    const double upper;
+
+    // prior
+    double lambda_a_prior;
+    double lambda_b_prior;
+
+public:
+    ShapeDensity(const double w_init, const double weight, const double la, const double lb) :
+        sum_nu(1.0),
+        sum_log_nu(0.0),
+        n(1),
+        w(w_init),
+        exponential_weight(weight),
+        lower(0.0),
+        upper(INFINITY),
+        lambda_a_prior(la),
+        lambda_b_prior(lb) { };
+
+    double operator() (double x) const {
+        if (x <= 0.0) {
+            return -INFINITY;
+        }
+        return R::lgammafn(n * x + 1.0) - n * x * log(sum_nu + lambda_b_prior) +
+                        x * (sum_log_nu - lambda_a_prior) - n * R::lgammafn(x);
+    }
+
+    void setSummaryStatistics(const Eigen::VectorXd & nu_vec);
+
+    void setPrior(const double la, const double lb) {
+        lambda_a_prior = la;
+        lambda_b_prior = lb;
+    }
+
+    void updateW(const double latest_w) {
+        w = w * (1 - exponential_weight) + exponential_weight * latest_w;
+    }
+
+    inline double getW() const {
+        return w;
+    }
+
+    void setW(const double new_w) {
+        w = new_w;
+    }
+
+    inline double getLower() const {
+        return lower;
+    }
+
+    inline double getUpper() const {
+        return upper;
+    }
+
+    inline double getSumNu() const {
+        return sum_nu;
+    }
+
+    inline double getSumLogNu() const {
+        return sum_log_nu;
+    }
+
+    inline int getN() const {
+        return n;
+    }
+};
+
 class Hypers {
     // vector of required list elements from R.
+    bool names_initialized;
     std::vector<std::string> r_names;
     void initializeListNames() {
+        if (names_initialized)
+            return;
         r_names.push_back("gam0");
         r_names.push_back("gam1");
         r_names.push_back("gam01");
@@ -491,13 +579,14 @@ class Hypers {
         r_names.push_back("lambda_b_prior");
         r_names.push_back("bead_precision_rate");
         r_names.push_back("bead_precision_shape");
+        r_names.push_back("p_a_prior");
+        r_names.push_back("p_b_prior");
+
+        names_initialized = true;
         return;
     };
 public:
-    // estimated
-    double mfi_nu_shape;
-    double mfi_nu_rate;
-    double p;
+    Rcpp::List fixed_hypers;
 
     //fixed
     double gam0;
@@ -507,6 +596,15 @@ public:
     double lambda_b_prior;
     double bead_precision_rate;
     double bead_precision_shape;
+    double p_a_prior;
+    double p_b_prior;
+
+    // estimated
+    double p;
+    double mfi_nu_shape;
+    double mfi_nu_rate;
+
+    ShapeDensity shape_sampler;
 
     Hypers(SEXP r_fixed_hyper);
     Hypers();
@@ -520,6 +618,16 @@ public:
         return R::lgammafn(n * x + 1.0) - n * x * log(sum_nu + lambda_b_prior) +
                 x * (sum_log_nu - lambda_a_prior) - n * R::lgammafn(x);
     };
+
+    Rcpp::List initializeHypersList(SEXP r_fixed_hypers) {
+        initializeListNames();  //should only be called once.
+        Rcpp::List tmp_list(r_fixed_hypers);
+        bool is_ok = checkListNames(r_names, tmp_list);
+        if (!is_ok) {
+            Rcpp::stop("Missing required names for fixed hyper-parameters from R.");
+        }
+        return tmp_list;
+    };
 };
 
 void mvNormSim(RngStream rng, Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > & solver,
@@ -527,5 +635,10 @@ void mvNormSim(RngStream rng, Eigen::SimplicialLLT<Eigen::SparseMatrix<double> >
         Eigen::VectorXd & sample);
 
 double thetaLikelihood(const Eigen::VectorXd & delta, const Eigen::VectorXd & weights);
+
+template <typename Func>
+double unimodalSliceSampler(RngStream rng, double x_init,
+        double x_upper, double x_lower,
+        double & w, Func & log_density);
 
 #endif
