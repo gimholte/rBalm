@@ -12,6 +12,7 @@
 #include "AllContainersForward.h"
 #include <Rcpp.h>
 #include <RcppEigenWrap.h>
+#include "utilities.h"
 #include "AllContainers.h"
 #include "rbalm.h"
 
@@ -59,7 +60,7 @@ Rcpp::List testLinearHelpersInit(SEXP retrms_, Eigen::VectorXd tau) {
 // [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
 Rcpp::List testLinearThetaFilling(SEXP retrms_) {
-    Linear lin(retrms_);
+    Linear lin(retrms_, 100);
     int k = lin.helpers.numBlocks();
     if (k < 2) {
         return List::create(_[""] = R_NilValue);
@@ -154,7 +155,7 @@ Rcpp::List beadListMcmcTest(SEXP r_bead_list, SEXP r_chain_ctl) {
 // [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
 Rcpp::List testSolver(SEXP r_linear_terms) {
-    Linear linear(r_linear_terms);
+    Linear linear(r_linear_terms, 100);
     linear.LtZt = linear.Lambdat * linear.Zt;
     linear.Omega = linear.LtZt * linear.LtZt.transpose() + linear.I_p;
     linear.helpers.solver.factorize(linear.Omega);
@@ -190,8 +191,8 @@ Eigen::MatrixXd testMvNormSim(const Eigen::SparseMatrix<double> omega,
 // [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
 SEXP testCholeskyFill() {
-    CovarianceTemplate t1(0, 5, .25);
-    CovarianceTemplate t2(0, 1, .25);
+    CovarianceTemplate t1(0, 5, .25, 1000);
+    CovarianceTemplate t2(0, 1, .25, 1000);
 
     Eigen::VectorXd test_sigma;
     test_sigma.resize(5);

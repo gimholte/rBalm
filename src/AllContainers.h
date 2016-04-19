@@ -1,8 +1,6 @@
 #ifndef ALLCONTAINTERS_H
 #define ALLCONTAINTERS_H
 
-bool checkListNames(const std::vector<std::string> & names, const Rcpp::List & ll);
-
 class BeadDist {
     Rcpp::NumericVector x_sorted;
     Rcpp::NumericVector abs_dev_from_median;
@@ -222,18 +220,116 @@ private:
     double cur_lik;
 };
 
+class MHtune {
+private:
+    int n_burn, n_check, num_iter, num_accept, total_accept, p;
+    double running_stat_count, mcmc_scale, mcmc_ar_target;
+    Eigen::MatrixXd par_cov, par_tmp;
+    Eigen::VectorXd par_mean, mean_tmp1;
+
+public:
+    Eigen::MatrixXd par_L;
+    MHtune(int n_burn_, int par_dim, double ar_target = .25) :
+        n_burn(n_burn_),
+        n_check(50),
+        num_iter(0),
+        num_accept(0),
+        total_accept(0),
+        p(par_dim),
+        running_stat_count(0.0),
+        mcmc_scale(1.0),
+        mcmc_ar_target(ar_target),
+        par_cov(p, p),
+        par_tmp(p, p),
+        par_L(p, p),
+        par_mean(p),
+        mean_tmp1(p)
+    { };
+
+    void updateRunningStats(const Eigen::VectorXd & sample) {
+        double n = running_stat_count;
+        double np1 = n + 1.0;
+        if (n == 0) {
+            par_cov.setZero();
+            par_L.setZero();
+            par_mean = sample;
+            running_stat_count += 1.0;
+            return;
+        }
+        mean_tmp1.noalias() = par_mean + (sample - par_mean) / np1;
+        par_cov *= n / (double) np1;
+        par_cov.noalias() += (sample - mean_tmp1) * (sample - par_mean).transpose() / np1;
+        par_mean = mean_tmp1;
+        running_stat_count += 1.0;
+        return;
+    }
+
+    void updateMcmcScale() {
+        const double a_prop = ((double) num_accept) / n_check;
+         if (a_prop < fmax(mcmc_ar_target - .05, .05)) {
+             mcmc_scale *= 1.0 - .25 * (mcmc_ar_target - a_prop) / mcmc_ar_target;
+         } else if (a_prop > fmin(mcmc_ar_target + .05, .95)) {
+             mcmc_scale *= 1.0 + .33 * (a_prop - mcmc_ar_target) / (1.0 - mcmc_ar_target);
+         }
+    }
+
+    void incrementNumIter() {
+        num_iter++;
+    }
+
+    void incrementNumAccept() {
+        num_accept++;
+        total_accept++;
+    }
+
+    void resetNumAccept() {
+        num_accept = 0;
+    }
+
+    void update(bool accept, const Eigen::VectorXd & cur_theta) {
+        incrementNumIter();
+        if (num_iter < n_burn) {
+            updateRunningStats(cur_theta);
+            if (accept)
+                incrementNumAccept();
+            if ((num_iter % n_check) == 0) {
+                updateMcmcScale();
+                resetNumAccept();
+            }
+            setParL();
+        }
+    }
+
+    void setParL() {
+        if (total_accept < 2 * p) {
+            par_tmp.setIdentity();
+            par_tmp *= mcmc_scale;
+            par_tmp.noalias() += par_cov;
+            par_L = par_tmp.llt().matrixL();
+            return;
+        }
+        par_L = par_cov.llt().matrixL();
+        par_L *= mcmc_scale;
+    }
+
+    Eigen::MatrixXd getCov() {
+        return par_cov;
+    }
+};
 class CovarianceTemplate {
 public:
     int within_theta_offset_val;
     int p;
     Eigen::VectorXd lower_tri;
+    MHtune theta_tuner;
 
-    CovarianceTemplate(int offset_val_, int p_, double rho_ = 0.0);
+    CovarianceTemplate(int offset_val_, int p_, double rho_,
+            int n_burn_);
 
     void proposeTheta(RngStream rng, Eigen::VectorXd & theta,
             MHValues & mhv);
 
-    void acceptLastProposal();
+    void acceptLastProposal(bool accept);
 
     void fillTheta(Eigen::VectorXd & theta) const {
         int t_ind, n = lower_tri.rows();
@@ -284,10 +380,10 @@ private:
     Eigen::MatrixXd D;
     Eigen::MatrixXd L_cor;
     Eigen::MatrixXd DL;
+    Eigen::VectorXd internal_theta, prop_internal_theta;
 
     void fillCholeskyDecomp();
 };
-
 
 class LinearHelpers {
 private:
@@ -433,7 +529,7 @@ public:
     // convenient things
     Eigen::VectorXd fitted;
 
-    Linear(SEXP r_linear_terms);
+    Linear(SEXP r_linear_terms, int n_burn);
     void update(RngStream rng,
             const Eigen::VectorXd & latent_fitted,
             const Eigen::VectorXd & mfi_obs_weights,
@@ -477,9 +573,9 @@ public:
         return true;
     }
 
-    void setLambdaHelperBlock(Eigen::VectorXd & new_theta, int block_idx);
+    void setLambdaHelperBlock(const Eigen::VectorXd & new_theta, int block_idx);
 
-    void setLambdaBlock(Eigen::VectorXd & new_theta, int block_idx);
+    void setLambdaBlock(const Eigen::VectorXd & new_theta, int block_idx);
 };
 
 /*
@@ -630,15 +726,5 @@ public:
     };
 };
 
-void mvNormSim(RngStream rng, Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > & solver,
-        const Eigen::SparseMatrix<double> & omega, const Eigen::VectorXd & tau,
-        Eigen::VectorXd & sample);
-
 double thetaLikelihood(const Eigen::VectorXd & delta, const Eigen::VectorXd & weights);
-
-template <typename Func>
-double unimodalSliceSampler(RngStream rng, double x_init,
-        double x_upper, double x_lower,
-        double & w, Func & log_density);
-
 #endif

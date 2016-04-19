@@ -7,6 +7,7 @@
 #include "AllContainersForward.h"
 #include <Rcpp.h>
 #include <RcppEigenWrap.h>
+#include "utilities.h"
 #include "AllContainers.h"
 
 namespace Rcpp {
@@ -24,14 +25,6 @@ using namespace Eigen;
 
 typedef SparseMatrix<double> SpMat;
 typedef MappedSparseMatrix<double> MSpMat;
-
-bool checkListNames(const std::vector<std::string> & names, const List & ll) {
-    bool all_in(true);
-    for (size_t i = 0, n = names.size(); i < n; i++) {
-        all_in &= ll.containsElementNamed(names[i].c_str());
-    }
-    return all_in;
-}
 
 ModelData::ModelData(SEXP r_bead_dist_list) {
     initializeListNames();
@@ -235,45 +228,6 @@ void ShapeDensity::setSummaryStatistics(const VectorXd & nu_vec) {
     return;
 };
 
-template <typename Func>
-double unimodalSliceSampler(RngStream rng, const double x_init,
-        const double x_upper, const double x_lower,
-        double & w, Func & log_density)
-{
-    /* z is the y-value for horizontal slice */
-    const double z = log_density(x_init) - RngStream_GA1(1.0, rng);
-    double R(fmin(x_upper, x_init + w));
-    double L(fmax(x_lower, x_init - w));
-    double g_R = log_density(R);
-    double g_L = log_density(L);
-
-    // grow interval endpoints until we find upper and lower endpoints
-    // s.t. G(R) < z and G(L) < z. Assumes unimodal density.
-    while (g_R > z) {
-        R += w;
-        R = fmin(R, x_upper);
-        g_R = log_density(R);
-    }
-
-    while (g_L > z) {
-        L -= w;
-        L = fmax(L, x_lower);
-        g_L = log_density(L);
-    }
-
-    // sample [L, R] interval, shrinking L,R if
-    // a sample X has density G(X) < z
-    double s;
-    while (s = RngStream_UnifAB(L, R, rng), log_density(s) < z) {
-        if (s > x_init)
-            R = s;
-        else
-            L = s;
-    }
-    w = fmax((R - L) / 2.0, .1);
-    return s;
-}
-
 void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
     shape_sampler.setSummaryStatistics(mfi_precision);
     double tmp_w = shape_sampler.getW();
@@ -287,7 +241,7 @@ void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
     mfi_nu_rate = RngStream_GA1(1.0 + n * mfi_nu_shape, rng) / (sum_nu + lambda_b_prior);
 }
 
-Linear::Linear(SEXP r_linear_terms) {
+Linear::Linear(SEXP r_linear_terms, int n_burn) {
     initializeListNames();
     List linear_terms(r_linear_terms);
     bool is_ok = checkListNames(r_names, linear_terms);
@@ -314,7 +268,7 @@ Linear::Linear(SEXP r_linear_terms) {
     int n_component = r_Ztlist.size();
     for (int k = 0; k < n_component; k++) {
         cov_templates.push_back(CovarianceTemplate(helpers.getOffsetTheta(k),
-                component_p(k), 0.0));
+                component_p(k), 0.0, n_burn));
 
         SEXP ztk = r_Ztlist[k];
         Ztlist.push_back(as<SpMat>(ztk));
@@ -375,18 +329,19 @@ void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
         theta.noalias() = work_theta_vec;
         setLambdaBlock(theta, k);
         // update the internal state of the covariance template
-        cvt.acceptLastProposal();
+        cvt.acceptLastProposal(true);
         // update fitted values with new
         setFitted();
     } else {
         // reject proposal
         // reset the lambda helper
         setLambdaHelperBlock(theta, k);
+        cvt.acceptLastProposal(false);
     }
     return;
 }
 
-void Linear::setLambdaHelperBlock(VectorXd & new_theta, int block_idx) {
+void Linear::setLambdaHelperBlock(const VectorXd & new_theta, int block_idx) {
     // use Lind to fill the block of lambdat at block_idx with values in new_theta
     const int offset = helpers.getOffsetLambda(block_idx);
     const int n_theta = helpers.nLambda(block_idx);
@@ -400,7 +355,7 @@ void Linear::setLambdaHelperBlock(VectorXd & new_theta, int block_idx) {
     return;
 }
 
-void Linear::setLambdaBlock(VectorXd & new_theta, int block_idx) {
+void Linear::setLambdaBlock(const VectorXd & new_theta, int block_idx) {
     // use Lind to fill the block of lambdat starting at block_idx with values in new_theta
     const int offset = helpers.getOffsetLambda(block_idx);
     const int n_theta = helpers.nLambda(block_idx);
@@ -494,63 +449,96 @@ void BeadDist::updateLaplaceMu(RngStream rng, const double mu_prior_mean,
     return;
 }
 
-void mvNormSim(RngStream rng, SimplicialLLT<SpMat> & solver,
-        const SpMat & omega, const VectorXd & tau, VectorXd & sample)
-{
-    for (size_t i = 0, n = sample.rows(); i < n; i++)
-        *(sample.data() + i) = RngStream_N01(rng);
-
-    solver.factorize(omega);
-    solver.matrixU().solveInPlace(sample);
-    sample.noalias() += solver.solve(tau);
-}
-
-CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_) :
+CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_,
+        int n_burn_) :
     within_theta_offset_val(offset_val_),
     p(p_),
     lower_tri(p_ * (p_ + 1) / 2),
+    theta_tuner(n_burn_, 2),
     rho(rho_),
     prop_rho(rho_),
     sigma(p_),
     prop_sigma(p_),
     D(p_, p_),
     L_cor(p_, p_),
-    DL(p_, p_)
+    DL(p_, p_),
+    internal_theta(2),
+    prop_internal_theta(2)
 {
     sigma.fill(1.0);
     fillCholeskyDecomp();
+    internal_theta(0) = 1.0;
+    internal_theta(1) = rho2phi(rho, p);
 };
 
 void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         MHValues & mhv) {
-    double cur_sig = sigma(0);
-    double prop_sig = exp(.5 * (RngStream_RandU01(rng) - .5)) * cur_sig;
+    if (p == 1) {
+        double cur_sig = sigma(0);
+        double prop_sig = exp(.5 * (RngStream_RandU01(rng) - .5)) * cur_sig;
 
-    // temporarily fill the internal state with proposal values
-    sigma.fill(prop_sig);
-    prop_sigma.fill(prop_sig);
-    prop_rho = rho;
-    fillCholeskyDecomp();
+        // temporarily fill the internal state with proposal values
+        sigma.fill(prop_sig);
+        prop_sigma.fill(prop_sig);
+        prop_rho = rho;
+        fillCholeskyDecomp();
 
-    // input new theta value
-    fillTheta(theta);
+        // input new theta value
+        fillTheta(theta);
 
-    // set MH proposal and prior values
-    mhv.setCurPrior(-.5 * log(cur_sig) + .5 * cur_sig);
-    mhv.setPropPrior(-.5 * log(prop_sig) + .5 * prop_sig);
-    mhv.setCurToProp( -log(prop_sig));
-    mhv.setPropToCur( -log(cur_sig));
+        // set MH proposal and prior values
+        mhv.setCurPrior(-.5 * log(cur_sig) + .5 * cur_sig);
+        mhv.setPropPrior(-.5 * log(prop_sig) + .5 * prop_sig);
+        mhv.setCurToProp( -log(prop_sig));
+        mhv.setPropToCur( -log(cur_sig));
 
-    // return to original internal state
-    sigma.fill(cur_sig);
-    fillCholeskyDecomp();
+        // return to original internal state
+        sigma.fill(cur_sig);
+        fillCholeskyDecomp();
+    } else {
+        const double cur_sig = sigma(0);
+        internal_theta(0) = log(cur_sig);
+        internal_theta(1) = rho2phi(rho, p);
+
+        prop_internal_theta(0) = RngStream_N01(rng);
+        prop_internal_theta(1) = RngStream_N01(rng);
+        prop_internal_theta = theta_tuner.par_L * prop_internal_theta;
+        prop_internal_theta.noalias() += internal_theta;
+
+        const double prop_sig = exp(prop_internal_theta(0));
+        const double cur_rho = rho;
+        sigma.fill(prop_sig);
+        prop_sigma.fill(prop_sig);
+        prop_rho = phi2rho(prop_internal_theta(1), p);
+        rho = prop_rho;
+        fillCholeskyDecomp();
+        fillTheta(theta);
+
+        // uniform prior on rho, gamma prior on sigma
+        mhv.setCurPrior(-.5 * log(cur_sig) + .5 * cur_sig);
+        mhv.setPropPrior(-.5 * log(prop_sig) + .5 * prop_sig);
+        // on sampling scale, symmetric proposal, so we need only the jacobian of transformation
+        // from regular scale to sampling scale.
+        // for rho, scaled derivative of inverse hyperbolic tangent
+        // for sigma, the jacobian is just the value of log_sigma
+        mhv.setCurToProp(log(dphi_drho(prop_rho, p)) - prop_internal_theta(0));
+        mhv.setPropToCur(log(dphi_drho(cur_rho, p)) - internal_theta(0));
+
+        sigma.fill(cur_sig);
+        rho = cur_rho;
+        fillCholeskyDecomp();
+    }
     return;
 }
 
-void CovarianceTemplate::acceptLastProposal() {
-    sigma = prop_sigma;
-    rho = prop_rho;
-    fillCholeskyDecomp();
+void CovarianceTemplate::acceptLastProposal(bool accept) {
+    if (accept) {
+        sigma = prop_sigma;
+        rho = prop_rho;
+        fillCholeskyDecomp();
+        internal_theta = prop_internal_theta;
+    };
+    theta_tuner.update(accept, internal_theta);
 }
 
 void CovarianceTemplate::fillCholeskyDecomp() {

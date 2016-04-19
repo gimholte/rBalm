@@ -5,6 +5,7 @@
 #include "AllContainersForward.h"
 #include <Rcpp.h>
 #include <RcppEigenWrap.h>
+#include "utilities.h"
 #include "AllContainers.h"
 #include "rbalm.h"
 
@@ -16,7 +17,7 @@ SimpleBalm::SimpleBalm(SEXP r_bead_list, SEXP r_chain_pars,
                 data(r_bead_list),
                 chain_pars(r_chain_pars),
                 latent(r_latent_terms),
-                linear(r_linear_terms),
+                linear(r_linear_terms, chain_pars.nBurn()),
                 hypers(),
                 rng(RngStream_CreateStream("")) {
     const int n_iter = chain_pars.nIter();
@@ -25,7 +26,7 @@ SimpleBalm::SimpleBalm(SEXP r_bead_list, SEXP r_chain_pars,
     trace_b.resize(linear.Zt.rows(), n_iter);
     trace_mu_g.resize(latent.Mt.rows(), n_iter);
     trace_nu_g.resize(latent.Mt.rows(), n_iter);
-    trace_hypers.resize(2, n_iter);
+    trace_hypers.resize(3, n_iter);
     trace_bead_mfi.resize(latent.Mt.cols(), n_iter);
     trace_bead_prec.resize(latent.Mt.cols(), n_iter);
     trace_theta.resize(linear.theta.rows(), n_iter);
@@ -46,7 +47,8 @@ void SimpleBalm::gatherTrace(const int i) {
     trace_mu_g.col(i) = latent.mu_g;
     trace_nu_g.col(i) = latent.nu_g;
     trace_hypers(0, i) = hypers.mfi_nu_shape;
-    trace_hypers(0, i) = hypers.mfi_nu_rate;
+    trace_hypers(1, i) = hypers.mfi_nu_rate;
+    trace_hypers(2, i) = hypers.shape_sampler.getW();
     trace_bead_mfi.col(i) = data.y;
     for (int j = 0; j < trace_bead_mfi.rows(); j++)
         trace_bead_prec(j, i) = data.bead_vec[j].getPrecision();
@@ -87,5 +89,6 @@ RcppExport SEXP rBalmMcmc(SEXP r_bead_list, SEXP r_chain_pars,
             _["bead_mu"] = wrap(model.trace_bead_mfi.transpose()),
             _["bead_precision"] = wrap(model.trace_bead_prec.transpose()),
             _["theta"] = wrap(model.trace_theta.transpose()),
-            _["Lambdat"] = wrap(model.linear.Lambdat));
+            _["Lambdat"] = wrap(model.linear.Lambdat),
+            _["tuner_cov"] = wrap(model.linear.cov_templates[0].theta_tuner.par_L));
 }
