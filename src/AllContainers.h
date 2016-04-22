@@ -316,6 +316,7 @@ public:
         return par_cov;
     }
 };
+
 class CovarianceTemplate {
 public:
     int within_theta_offset_val;
@@ -372,7 +373,6 @@ public:
     double getRho() const {
         return rho;
     }
-
 
 private:
     double rho, prop_rho;
@@ -574,7 +574,6 @@ public:
     }
 
     void setLambdaHelperBlock(const Eigen::VectorXd & new_theta, int block_idx);
-
     void setLambdaBlock(const Eigen::VectorXd & new_theta, int block_idx);
 };
 

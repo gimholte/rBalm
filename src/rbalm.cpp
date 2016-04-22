@@ -57,9 +57,10 @@ void SimpleBalm::gatherTrace(const int i) {
 }
 
 // [[Rcpp::depends(RcppEigen)]]
-RcppExport SEXP rBalmMcmc(SEXP r_bead_list, SEXP r_chain_pars,
+// [[Rcpp::export]]
+SEXP rBalmMcmc(SEXP r_bead_list, SEXP r_chain_pars,
         SEXP r_latent_reTrms, SEXP r_linear_reTrms) {
-    Rcout << "Initializing model... ";
+    Rcout << "Initializing model... " << std::endl;
     SimpleBalm model(r_bead_list,
             r_chain_pars,
             r_latent_reTrms,

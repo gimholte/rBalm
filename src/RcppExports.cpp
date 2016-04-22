@@ -6,6 +6,20 @@
 
 using namespace Rcpp;
 
+// rBalmMcmc
+SEXP rBalmMcmc(SEXP r_bead_list, SEXP r_chain_pars, SEXP r_latent_reTrms, SEXP r_linear_reTrms);
+RcppExport SEXP rBalm_rBalmMcmc(SEXP r_bead_listSEXP, SEXP r_chain_parsSEXP, SEXP r_latent_reTrmsSEXP, SEXP r_linear_reTrmsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject __result;
+    Rcpp::RNGScope __rngScope;
+    Rcpp::traits::input_parameter< SEXP >::type r_bead_list(r_bead_listSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type r_chain_pars(r_chain_parsSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type r_latent_reTrms(r_latent_reTrmsSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type r_linear_reTrms(r_linear_reTrmsSEXP);
+    __result = Rcpp::wrap(rBalmMcmc(r_bead_list, r_chain_pars, r_latent_reTrms, r_linear_reTrms));
+    return __result;
+END_RCPP
+}
 // testLinearHelpersInit
 Rcpp::List testLinearHelpersInit(SEXP retrms_, Eigen::VectorXd tau);
 RcppExport SEXP rBalm_testLinearHelpersInit(SEXP retrms_SEXP, SEXP tauSEXP) {

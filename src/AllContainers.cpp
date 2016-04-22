@@ -31,12 +31,15 @@ ModelData::ModelData(SEXP r_bead_dist_list) {
     List bead_dist_list(r_bead_dist_list);
     List::iterator in_iter, in_end = bead_dist_list.end();
     for (in_iter = bead_dist_list.begin(); in_iter != in_end; ++in_iter) {
-        checkListNames(r_names, *in_iter); // rely on implicit conversion to List.
+        if (!checkListNames(r_names, *in_iter))
+            stop("failure initializing bead distributions");
+        // rely on implicit conversion to List.
         bead_vec.push_back(as<BeadDist>(*in_iter));
     }
     n_mfi = bead_vec.size();
     y.resize(n_mfi);
     fillY();
+    Rcpp::Rcout << "Bead distributions initialized ..." << std::endl;
 };
 
 void ModelData::update(RngStream rng,
@@ -74,6 +77,7 @@ ChainParameters::ChainParameters(SEXP r_chain_pars) {
     for (it = r_names.begin(); it != r_names.end(); ++it) {
         iter_pars[*it] = as<int>(chain_pars[it->c_str()]);
     }
+    Rcpp::Rcout << "Chain parameters initialized... " << std::endl;
 };
 
 Latent::Latent(SEXP r_latent_term) {
@@ -108,7 +112,7 @@ Latent::Latent(SEXP r_latent_term) {
     fitted = Mt.transpose() * mu_g;
     weights = Mt.transpose() * nu_g;
 
-    Rcout << "Initialized latent component... ";
+    Rcout << "Initialized latent component... " << std::endl;
 };
 
 void Latent::update(RngStream rng, const VectorXd & data_y,
@@ -277,6 +281,8 @@ Linear::Linear(SEXP r_linear_terms, int n_burn) {
     if (!checkBlocks(helpers.block_lambdat, Lambdat)) {
         stop("Bad lambdat_blocks transfer in Linear::Linear(SEXP) constructor");
     };
+
+    Rcout << "Linear component initialized... " << std::endl;
 };
 
 void Linear::update(RngStream rng, const VectorXd & latent_fitted,
@@ -454,7 +460,7 @@ CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_,
     within_theta_offset_val(offset_val_),
     p(p_),
     lower_tri(p_ * (p_ + 1) / 2),
-    theta_tuner(n_burn_, 2),
+    theta_tuner(n_burn_, p_ == 1 ? 1 : 2),
     rho(rho_),
     prop_rho(rho_),
     sigma(p_),
@@ -462,28 +468,28 @@ CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_,
     D(p_, p_),
     L_cor(p_, p_),
     DL(p_, p_),
-    internal_theta(2),
-    prop_internal_theta(2)
+    internal_theta(p_ == 1 ? 1 : 2),
+    prop_internal_theta(p_ == 1 ? 1 : 2)
 {
     sigma.fill(1.0);
     fillCholeskyDecomp();
     internal_theta(0) = 1.0;
-    internal_theta(1) = rho2phi(rho, p);
+    if (p > 1)
+        internal_theta(1) = rho2phi(rho, p);
 };
 
 void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         MHValues & mhv) {
     if (p == 1) {
         double cur_sig = sigma(0);
-        double prop_sig = exp(.5 * (RngStream_RandU01(rng) - .5)) * cur_sig;
+        internal_theta(0) = log(cur_sig);
+        prop_internal_theta(0) = theta_tuner.par_L(0, 0) * RngStream_N01(rng) + internal_theta(0);
 
-        // temporarily fill the internal state with proposal values
+        // temporarily fill the internal template state with proposal values
+        const double prop_sig = exp(prop_internal_theta(0));
         sigma.fill(prop_sig);
         prop_sigma.fill(prop_sig);
-        prop_rho = rho;
         fillCholeskyDecomp();
-
-        // input new theta value
         fillTheta(theta);
 
         // set MH proposal and prior values
@@ -502,8 +508,7 @@ void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
 
         prop_internal_theta(0) = RngStream_N01(rng);
         prop_internal_theta(1) = RngStream_N01(rng);
-        prop_internal_theta = theta_tuner.par_L * prop_internal_theta;
-        prop_internal_theta.noalias() += internal_theta;
+        prop_internal_theta = theta_tuner.par_L * prop_internal_theta + internal_theta;
 
         const double prop_sig = exp(prop_internal_theta(0));
         const double cur_rho = rho;
