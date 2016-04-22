@@ -39,7 +39,6 @@ ModelData::ModelData(SEXP r_bead_dist_list) {
     n_mfi = bead_vec.size();
     y.resize(n_mfi);
     fillY();
-    Rcpp::Rcout << "Bead distributions initialized ..." << std::endl;
 };
 
 void ModelData::update(RngStream rng,
@@ -77,7 +76,6 @@ ChainParameters::ChainParameters(SEXP r_chain_pars) {
     for (it = r_names.begin(); it != r_names.end(); ++it) {
         iter_pars[*it] = as<int>(chain_pars[it->c_str()]);
     }
-    Rcpp::Rcout << "Chain parameters initialized... " << std::endl;
 };
 
 Latent::Latent(SEXP r_latent_term) {
@@ -111,8 +109,6 @@ Latent::Latent(SEXP r_latent_term) {
     resid = VectorXd::Constant(nobs, 1.0);
     fitted = Mt.transpose() * mu_g;
     weights = Mt.transpose() * nu_g;
-
-    Rcout << "Initialized latent component... " << std::endl;
 };
 
 void Latent::update(RngStream rng, const VectorXd & data_y,
@@ -281,8 +277,6 @@ Linear::Linear(SEXP r_linear_terms, int n_burn) {
     if (!checkBlocks(helpers.block_lambdat, Lambdat)) {
         stop("Bad lambdat_blocks transfer in Linear::Linear(SEXP) constructor");
     };
-
-    Rcout << "Linear component initialized... " << std::endl;
 };
 
 void Linear::update(RngStream rng, const VectorXd & latent_fitted,
