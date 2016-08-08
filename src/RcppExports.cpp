@@ -6,9 +6,9 @@
 
 using namespace Rcpp;
 
-// rBalmMcmc
-SEXP rBalmMcmc(SEXP r_bead_list, SEXP r_chain_pars, SEXP r_latent_reTrms, SEXP r_linear_reTrms);
-RcppExport SEXP rBalm_rBalmMcmc(SEXP r_bead_listSEXP, SEXP r_chain_parsSEXP, SEXP r_latent_reTrmsSEXP, SEXP r_linear_reTrmsSEXP) {
+// bambaMcmc
+SEXP bambaMcmc(SEXP r_bead_list, SEXP r_chain_pars, SEXP r_latent_reTrms, SEXP r_linear_reTrms, SEXP r_hyper_list, SEXP r_at_matrix, SEXP r_update_beads);
+RcppExport SEXP rBalm_bambaMcmc(SEXP r_bead_listSEXP, SEXP r_chain_parsSEXP, SEXP r_latent_reTrmsSEXP, SEXP r_linear_reTrmsSEXP, SEXP r_hyper_listSEXP, SEXP r_at_matrixSEXP, SEXP r_update_beadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject __result;
     Rcpp::RNGScope __rngScope;
@@ -16,7 +16,10 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< SEXP >::type r_chain_pars(r_chain_parsSEXP);
     Rcpp::traits::input_parameter< SEXP >::type r_latent_reTrms(r_latent_reTrmsSEXP);
     Rcpp::traits::input_parameter< SEXP >::type r_linear_reTrms(r_linear_reTrmsSEXP);
-    __result = Rcpp::wrap(rBalmMcmc(r_bead_list, r_chain_pars, r_latent_reTrms, r_linear_reTrms));
+    Rcpp::traits::input_parameter< SEXP >::type r_hyper_list(r_hyper_listSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type r_at_matrix(r_at_matrixSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type r_update_beads(r_update_beadsSEXP);
+    __result = Rcpp::wrap(bambaMcmc(r_bead_list, r_chain_pars, r_latent_reTrms, r_linear_reTrms, r_hyper_list, r_at_matrix, r_update_beads));
     return __result;
 END_RCPP
 }
@@ -43,13 +46,15 @@ BEGIN_RCPP
     return __result;
 END_RCPP
 }
-// rBalmTestNuPriors
-SEXP rBalmTestNuPriors();
-RcppExport SEXP rBalm_rBalmTestNuPriors() {
+// testConstructR
+Rcpp::List testConstructR(SEXP retrms_, Eigen::VectorXd r_gamma);
+RcppExport SEXP rBalm_testConstructR(SEXP retrms_SEXP, SEXP r_gammaSEXP) {
 BEGIN_RCPP
     Rcpp::RObject __result;
     Rcpp::RNGScope __rngScope;
-    __result = Rcpp::wrap(rBalmTestNuPriors());
+    Rcpp::traits::input_parameter< SEXP >::type retrms_(retrms_SEXP);
+    Rcpp::traits::input_parameter< Eigen::VectorXd >::type r_gamma(r_gammaSEXP);
+    __result = Rcpp::wrap(testConstructR(retrms_, r_gamma));
     return __result;
 END_RCPP
 }
@@ -108,6 +113,17 @@ BEGIN_RCPP
     Rcpp::RObject __result;
     Rcpp::RNGScope __rngScope;
     __result = Rcpp::wrap(testCholeskyFill());
+    return __result;
+END_RCPP
+}
+// logDeterminant
+double logDeterminant(const Eigen::MatrixXd& S);
+RcppExport SEXP rBalm_logDeterminant(SEXP SSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject __result;
+    Rcpp::RNGScope __rngScope;
+    Rcpp::traits::input_parameter< const Eigen::MatrixXd& >::type S(SSEXP);
+    __result = Rcpp::wrap(logDeterminant(S));
     return __result;
 END_RCPP
 }

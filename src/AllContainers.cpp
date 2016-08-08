@@ -95,12 +95,30 @@ Latent::Latent(SEXP r_latent_term) {
     if (cnms_tmp.size() != 2)
         stop("Invalid number of latent response levels in latent model (must be 2)");
 
+    var_prior = as<std::string>(latent_term["var_prior"]);
     Mt = latent_term["Zt"]; // implicit conversion
     const int nmu = Mt.rows();
     const int nobs = Mt.cols();
+    Rt.resize(nmu, nobs);
+    Rt.reserve(VectorXi::Constant(Mt.cols(), 1));
+
+    Omega_bar.resize(nobs, nobs);
+    G_diag.resize(nmu);
+    tau.resize(nmu);
+    mu_compressed.resize(nmu);
+
+    G_diag.fill(1.0);
+    G.resize(nmu, nmu);
+    G.setIdentity();
+    V.resize(nobs, nobs);
+    V.setIdentity();
+
+    tau.fill(1.0);
+    mu_compressed.fill(1.0);
+
     mu_g = VectorXd::Constant(nmu, 0.0);
-    nu_g = VectorXd::Constant(nmu, 100.0);
-    gamma = VectorXd::Constant(nmu / 2, 0);
+    nu_g = VectorXd::Constant(nmu, 148.3589);
+    gamma = VectorXd::Constant(nmu / 2, 1.0);
     counts = Mt * VectorXd::Constant(nobs, 1.0);
 
     yss_w = VectorXd::Constant(nmu, 1.0);
@@ -109,64 +127,74 @@ Latent::Latent(SEXP r_latent_term) {
     resid = VectorXd::Constant(nobs, 1.0);
     fitted = Mt.transpose() * mu_g;
     weights = Mt.transpose() * nu_g;
+    V = V * weights.asDiagonal();
 };
 
-void Latent::update(RngStream rng, const VectorXd & data_y,
-        const VectorXd & linear_fitted, const Hypers & hypers) {
-    updateMu(rng, data_y, linear_fitted, hypers);
-    updateNu(rng, data_y, linear_fitted, hypers);
-    return;
-}
-
-void Latent::updateNu(RngStream rng, const VectorXd & data_y,
-        const VectorXd & linear_fitted, const Hypers & hypers) {
-    double joint_rate, joint_shape;
-    resid.noalias() = data_y - fitted - linear_fitted;
+void Latent::updateNu(RngStream rng, const VectorXd & y_tilde,
+        const Hypers & hypers) {
+    resid.noalias() = y_tilde - fitted;
     yss_w.noalias() = Mt * resid.cwiseProduct(resid);
-    size_t j, n = nu_g.size();
-    for (j = 0; j < n; j++) {
-        joint_shape = hypers.mfi_nu_shape + counts(j) / 2.0;
-        joint_rate = hypers.mfi_nu_rate + yss_w(j) / 2.0;
-        nu_g(j) = RngStream_GA1(joint_shape, rng) / joint_rate;
+    int j;
+    double prop_val, cur_val;
+    MHValues mhv;
+    for (j = 0; j < nu_g.size(); j++) {
+        if ((var_prior == "gamma") | (var_prior == "gamma_mean_var")) {
+            double joint_rate, joint_shape;
+            joint_shape = hypers.mfi_nu_shape + counts(j) / 2.0;
+            joint_rate = hypers.mfi_nu_rate + yss_w(j) / 2.0;
+            nu_g(j) = RngStream_GA1(joint_shape, rng) / joint_rate;
+        }
+        if (var_prior == "half_cauchy") {
+            cur_val = 1.0 / sqrt(nu_g(j));
+            prop_val = cur_val * exp(.5* RngStream_UnifAB(-1.0, 1.0, rng));
+
+            mhv.setCurLik(sigmaLik(cur_val, counts(j), yss_w(j), hypers.cauchy_sd_scale));
+            mhv.setPropLik(sigmaLik(prop_val, counts(j), yss_w(j), hypers.cauchy_sd_scale));
+            mhv.setCurPrior(0.0);
+            mhv.setPropPrior(0.0);
+            mhv.setPropToCur(-log(cur_val));
+            mhv.setCurToProp(-log(prop_val));
+
+            if (log(RngStream_RandU01(rng)) <= mhv.logA()) {
+                nu_g(j) = 1.0 / (prop_val * prop_val);
+            }
+        }
     }
     weights.noalias() = Mt.transpose() * nu_g;
+    V.setIdentity();
+    V = V * weights.asDiagonal();
     return;
 }
 
-void Latent::updateMu(RngStream rng, const VectorXd & data_y,
-            const VectorXd & linear_fitted, const Hypers & hypers) {
+void Latent::updateMu(RngStream rng, const VectorXd & y_tilde,
+        const Hypers & hypers) {
     double c0, c1, c01;
     double l0, l1, l01;
     double mu0, mu1, mu01;
     double null_prob;
-    sum_y_w.noalias() = Mt * (data_y - linear_fitted).cwiseProduct(weights);
-    sum_yy_w.noalias() = Mt * (data_y - linear_fitted).cwiseProduct(data_y - linear_fitted).cwiseProduct(weights);
+    double p_local;
+    VectorXd p_fitted = hypers.At.transpose() * hypers.p;
+    sum_y_w.noalias() = Mt * (y_tilde).cwiseProduct(weights);
 
     size_t i, j, jp1, n_group = mu_g.size() / 2;
     for (i = 0, j = 0, jp1 = 1;
             i < n_group;
             ++i, j += 2, jp1 += 2) {
-        l0 = hypers.gam0 + counts(j) * nu_g(j);
-        l1 = hypers.gam1 + counts(jp1) * nu_g(jp1);
-        l01 = hypers.gam01 + counts(j) * nu_g(j) + counts(jp1) * nu_g(jp1);
+        l0 = hypers.tau + counts(j) * nu_g(j);
+        l1 = hypers.tau + counts(jp1) * nu_g(jp1);
+        l01 = hypers.tau + counts(j) * nu_g(j) + counts(jp1) * nu_g(jp1);
 
-        mu0 = sum_y_w(j) / l0;
-        mu1 = sum_y_w(jp1) / l1;
-        mu01 = (sum_y_w(j) + sum_y_w(jp1)) / l01;
+        mu0 = (sum_y_w(j) + hypers.tau * hypers.mu_overall) / l0;
+        mu1 = (sum_y_w(jp1) + hypers.tau * hypers.mu_overall) / l1;
+        mu01 = (sum_y_w(j) + sum_y_w(jp1) + hypers.tau * hypers.mu_overall) / l01;
 
-        c0 = -.5 * sum_yy_w(j);
-        c0 += .5 * pow(sum_y_w(j), 2) / l0;
-        c0 += .5 * log(hypers.gam0) -.5 * log(l0);
+        c0 = .5 * pow(mu0, 2) * l0 + .5 * log(hypers.tau) - .5 * log(l0);
+        c1 = .5 * pow(mu1, 2) * l1 + .5 * log(hypers.tau) - .5 * log(l1);
+        c01 = .5 * pow(mu01, 2) * l01 + .5 * log(hypers.tau) - .5 * log(l01);
 
-        c1 = -.5 * sum_yy_w(jp1);
-        c1 += .5 * pow(sum_y_w(jp1), 2) / l1;
-        c1 += .5 * log(hypers.gam1) -.5 * log(l1);
+        p_local = p_fitted[i];
+        null_prob = (1 - p_local) / (p_local * exp(c0 + c1 - c01) + (1 - p_local));
 
-        c01 = -.5 * sum_yy_w(j) -.5 * sum_yy_w(jp1);
-        c01 += .5 * pow(sum_y_w(j) + sum_y_w(jp1), 2) / l01;
-        c01 += .5 * log(hypers.gam01) -.5 * log(l01);
-
-        null_prob = (1 - hypers.p) / (hypers.p * exp(c0 + c1 - c01) + (1 - hypers.p));
         if (RngStream_RandU01(rng) < null_prob) {
             mu01 = RngStream_N01(rng) / sqrt(l01) + mu01;
             mu_g(j) = mu01;
@@ -182,77 +210,354 @@ void Latent::updateMu(RngStream rng, const VectorXd & data_y,
     return;
 }
 
-Hypers::Hypers(SEXP r_fixed_hypers) :
+void Latent::constructRG(double g01, double g0, double g1,
+        double m_c, double m_0, double m_1) {
+    int n_terms = gamma.size() + (int) gamma.sum();
+    Rt.resize(n_terms, Mt.cols());
+    Rt.reserve(VectorXi::Constant(Mt.cols(), 1));
+
+    G_diag.resize(n_terms);
+    G.resize(n_terms, n_terms);
+    G.setIdentity();
+    prior_tau.resize(n_terms);
+    VectorXi rowMap(Mt.rows());
+    int new_row = 0;
+
+    for (int k = 0, j = 0; k < gamma.size(); ++k) {
+        rowMap[2 * k] = new_row;
+        G_diag[new_row] = g01;
+        prior_tau[j] = m_c;
+        if (gamma[k] > .5) {
+            G_diag[new_row] = g0;
+            prior_tau[j] = m_0;
+            ++new_row;
+            ++j;
+            G_diag[new_row] = g1;
+            prior_tau[j] = m_1;
+        }
+        rowMap[2 * k + 1] = new_row;
+        ++new_row;
+        ++j;
+    }
+
+    for (int k = 0; k < Mt.outerSize(); ++k)
+        for (SparseMatrix<double>::InnerIterator it(Mt,k); it; ++it)
+        {
+            new_row = rowMap[it.row()];   // row index remapped based on gamma
+            Rt.insert(new_row, it.col()) = it.value();
+        }
+
+    G = G * G_diag.asDiagonal();
+    prior_tau = G * prior_tau;
+    return;
+}
+
+void Latent::updateMuMarginal(RngStream rng,
+        Linear & linear,
+        const Eigen::VectorXd & data_y,
+        const Hypers & hyp) {
+
+    constructRG(hyp.tau, hyp.tau, hyp.tau,
+            hyp.mu_overall, hyp.mu_overall, hyp.mu_overall);
+    mu_compressed.resize(Rt.rows());
+    if (linear.isNull()) {
+        Omega_bar = V;
+    } else {
+        linear.LtZt = linear.Lambdat * linear.Zt;
+        linear.Omega = linear.LtZt * V * linear.LtZt.transpose() + linear.I_p;
+        linear.helpers.solver.factorize(linear.Omega);
+
+        Omega_bar = linear.helpers.solver.solve(linear.LtZt);
+        Omega_bar = V * linear.LtZt.transpose() * Omega_bar * V;
+        Omega_bar = V - Omega_bar;
+    }
+    tau.noalias() = Rt * Omega_bar * data_y + prior_tau;
+    Omega_bar = Rt * Omega_bar * Rt.transpose() + G;
+    Omega_bar_solver.analyzePattern(Omega_bar);
+    Omega_bar_solver.factorize(Omega_bar);
+
+    mvNormSim(rng, Omega_bar_solver, Omega_bar, tau, mu_compressed);
+    expandMu();
+    fitted = Mt.transpose() * mu_g;
+}
+
+void Latent::expandMu() {
+    int n_groups = gamma.size();
+    int k = 0;
+    for (int i = 0; i < n_groups; i++) {
+        if (gamma[i] < .5) {
+            mu_g[2 * i] = mu_compressed[k];
+            mu_g[2 * i + 1] = mu_compressed[k];
+        } else {
+            mu_g[2 * i] = mu_compressed[k];
+            k++;
+            mu_g[2 * i + 1] = mu_compressed[k];
+        }
+        k++;
+    }
+}
+
+Hypers::Hypers(SEXP r_fixed_hypers, SEXP r_at_matrix) :
         names_initialized(false),
         r_names(0),
         fixed_hypers(initializeHypersList(r_fixed_hypers)),
-        gam0(as<double>(fixed_hypers["gam0"])),
-        gam1(as<double>(fixed_hypers["gam1"])),
-        gam01(as<double>(fixed_hypers["gam01"])),
         lambda_a_prior(as<double>(fixed_hypers["lambda_a_prior"])),
         lambda_b_prior(as<double>(fixed_hypers["lambda_b_prior"])),
-        bead_precision_rate(as<double>(fixed_hypers["bead_precision_rate"])),
-        bead_precision_shape(as<double>(fixed_hypers["bead_precision_shape"])),
-        p_a_prior(as<double>(fixed_hypers["p_a_prior"])),
-        p_b_prior(as<double>(fixed_hypers["p_b_prior"])),
-        p(.05),
-        mfi_nu_shape(.5),
-        mfi_nu_rate(.5),
-        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) { };
+        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) {
+    bead_precision_rate = as<double>(fixed_hypers["bead_precision_rate"]);
+    bead_precision_shape = as<double>(fixed_hypers["bead_precision_shape"]);
 
-Hypers::Hypers() :
+    p_alpha = as<double>(fixed_hypers["p_alpha"]);
+    p_beta = as<double>(fixed_hypers["p_beta"]);
+
+    tau_prior_shape = as<double>(fixed_hypers["tau_prior_shape"]);
+    tau_prior_rate = as<double>(fixed_hypers["tau_prior_rate"]);
+    mu_overall_bar = as<double>(fixed_hypers["mu_overall_bar"]);
+
+    n_0 = as<double>(fixed_hypers["n_0"]);
+
+    theta_shape = as<double>(fixed_hypers["theta_shape"]);
+    theta_rate = as<double>(fixed_hypers["theta_rate"]);
+    tau = as<double>(fixed_hypers["tau"]);
+
+    mfi_nu_shape = 5;
+    mfi_nu_rate = .05;
+    cauchy_sd_scale = as<double>(fixed_hypers["cauchy_sd_scale"]);
+    prec_mean_prior_mean = as<double>(fixed_hypers["prec_mean_prior_mean"]);
+    prec_mean_prior_sd = as<double>(fixed_hypers["prec_mean_prior_sd"]);
+    prec_var_prior_mean = as<double>(fixed_hypers["prec_var_prior_mean"]);
+    prec_var_prior_sd = as<double>(fixed_hypers["prec_var_prior_sd"]);
+
+    mu_overall = 0.0;
+
+    At = as<SparseMatrix<double> >(r_at_matrix);
+    p.resize(At.rows());
+    p.fill(0.05);
+    a_counts.resize(At.rows());
+    VectorXd tmp_ones = VectorXd::Constant(At.cols(), 1.0);
+    total_counts = At * tmp_ones;
+};
+
+Hypers::Hypers(SEXP r_at_matrix) :
         names_initialized(true),
         r_names(0),
         fixed_hypers(0),
-        gam0(.1),
-        gam1(.1),
-        gam01(.1),
         lambda_a_prior(.05),
         lambda_b_prior(.05),
-        bead_precision_rate(1.0),
-        bead_precision_shape(1.0),
-        p_a_prior(.05),
-        p_b_prior(.5),
-        p(.05),
-        mfi_nu_shape(.5),
-        mfi_nu_rate(.5),
-        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) {};
+        shape_sampler(2.0, .25, lambda_a_prior, lambda_b_prior) {
+    bead_precision_rate = 1.0,
+    bead_precision_shape = 1.0,
 
-void ShapeDensity::setSummaryStatistics(const VectorXd & nu_vec) {
-    n = nu_vec.rows();
-    sum_nu = nu_vec.sum();
-    sum_log_nu = 0.0;
-    for (int i = 0; i < n; i++) {
-        sum_log_nu += log(nu_vec(i));
-    }
-    return;
+    p_alpha = .05;
+    p_beta = .5;
+
+    tau_prior_shape = .5;
+    tau_prior_rate = 5.;
+    mu_overall_bar = 0.0;
+    n_0 = .05;
+
+    theta_shape = .5;
+    theta_rate = .5;
+
+    tau = .05;
+    mu_overall = 0.0;
+
+    mfi_nu_shape = .0005;
+    mfi_nu_rate = .0005;
+
+
+    cauchy_sd_scale = .1;
+
+    prec_mean_prior_mean = 50.0;
+    prec_mean_prior_sd = 50.0;
+    prec_var_prior_mean = 50.0 * 50.0;
+    prec_var_prior_sd = 250.0;
+
+    At = as<SparseMatrix<double> >(r_at_matrix);
+    p.resize(At.rows());
+    p.fill(0.05);
+    a_counts.resize(At.rows());
+    VectorXd tmp_ones = VectorXd::Constant(At.cols(), 1.0);
+    total_counts = At * tmp_ones;
 };
 
-void Hypers::update(RngStream rng, VectorXd & mfi_precision) {
-    shape_sampler.setSummaryStatistics(mfi_precision);
-    double tmp_w = shape_sampler.getW();
-    double new_mfi_nu_shape = unimodalSliceSampler(rng, mfi_nu_shape,
-            shape_sampler.getUpper(), shape_sampler.getLower(), tmp_w,
-            shape_sampler);
-    shape_sampler.updateW(tmp_w);
-    mfi_nu_shape = new_mfi_nu_shape;
-    const int n = shape_sampler.getN();
-    const double sum_nu = shape_sampler.getSumNu();
-    mfi_nu_rate = RngStream_GA1(1.0 + n * mfi_nu_shape, rng) / (sum_nu + lambda_b_prior);
+void Hypers::update(RngStream rng, const VectorXd & mfi_precision, const VectorXd & gamma,
+        const VectorXd & mu_vec, const std::string var_prior) {
+    if (var_prior == "gamma") {
+        shape_sampler.setSummaryStatistics(mfi_precision);
+        double tmp_w = shape_sampler.getW();
+        double new_mfi_nu_shape = unimodalSliceSampler(rng, mfi_nu_shape,
+                shape_sampler.getUpper(), shape_sampler.getLower(), tmp_w,
+                shape_sampler);
+        shape_sampler.updateW(tmp_w);
+        mfi_nu_shape = new_mfi_nu_shape;
+        const int n = shape_sampler.getN();
+        const double sum_nu = shape_sampler.getSumNu();
+        mfi_nu_rate = RngStream_GA1(1.0 + n * mfi_nu_shape, rng) / (sum_nu + lambda_b_prior);
+    }
+    if (var_prior == "half_cauchy"){
+        updateCauchySdScale(rng, mfi_precision);
+    }
+    if (var_prior == "gamma_mean_var") {
+        updateGammaMeanVarPrior(rng, mfi_precision);
+    }
+    updateMuPrior(rng, gamma, mu_vec);
+    updateP(rng, gamma);
 }
 
-Linear::Linear(SEXP r_linear_terms, int n_burn) {
+void Hypers::updateGammaMeanVarPrior(RngStream rng, const VectorXd & mfi_precision) {
+    double mu_cur = mfi_nu_shape / mfi_nu_rate;
+    double sig_cur = mfi_nu_shape / pow(mfi_nu_rate, 2);
+    double cur_lik(0.0), prop_lik(0.0), nu;
+    MHValues mhv;
+
+    const double mu_prop = mu_cur * exp(.2 * RngStream_UnifAB(-1, 1, rng));
+    for (int i = 0; i < mfi_precision.size(); ++i) {
+        nu = mfi_precision(i);
+        cur_lik += precisionLik(nu, mu_cur, sig_cur);
+        prop_lik += precisionLik(nu, mu_prop, sig_cur);
+    }
+
+    mhv.setCurLik(cur_lik);
+    mhv.setPropLik(prop_lik);
+    mhv.setCurPrior(precisionLik(mu_cur, prec_mean_prior_mean, pow(prec_mean_prior_sd, 2)));
+    mhv.setPropPrior(precisionLik(mu_prop, prec_mean_prior_mean, pow(prec_mean_prior_sd, 2)));
+    mhv.setCurToProp(-log(mu_prop));
+    mhv.setPropToCur(-log(mu_cur));
+
+    if (log(RngStream_RandU01(rng)) <= mhv.logA()) {
+        mu_cur = mu_prop;
+    }
+
+    const double sig_prop = sig_cur * exp(.3 * RngStream_UnifAB(-1, 1, rng));
+    prop_lik = 0.0;
+    cur_lik = 0.0;
+    for (int i = 0; i < mfi_precision.size(); ++i) {
+        nu = mfi_precision(i);
+        cur_lik += precisionLik(nu, mu_cur, sig_cur);
+        prop_lik += precisionLik(nu, mu_cur, sig_prop);
+    }
+
+    mhv.setCurLik(cur_lik);
+    mhv.setPropLik(prop_lik);
+    mhv.setCurPrior(precisionLik(sig_cur, prec_var_prior_mean, pow(prec_var_prior_sd, 2)));
+    mhv.setPropPrior(precisionLik(sig_prop, prec_var_prior_mean, pow(prec_var_prior_sd, 2)));
+    mhv.setCurToProp(-log(sig_prop));
+    mhv.setPropToCur(-log(sig_cur));
+
+    if (log(RngStream_RandU01(rng)) <= mhv.logA()) {
+        sig_cur = sig_prop;
+    }
+
+    mfi_nu_shape = mu_cur * mu_cur / sig_cur;
+    mfi_nu_rate = mu_cur / sig_cur;
+}
+
+void Hypers::updateCauchySdScale(RngStream rng, const VectorXd & mfi_precision) {
+    MHValues mhv;
+    double nu, cur_lik(0.0), prop_lik(0.0);
+    const double cur_val = cauchy_sd_scale;
+    const double prop_val = cur_val * exp(.5 * RngStream_UnifAB(-1.0, 1.0, rng));
+
+    int j;
+    for (j = 0; j < mfi_precision.size(); ++j) {
+        nu = mfi_precision(j);
+        cur_lik += -log1p(1.0 / (cur_val * cur_val * nu));
+        prop_lik += -log1p(1.0 / (prop_val * prop_val * nu));
+    }
+    double n_nu = (double) mfi_precision.size();
+    cur_lik += -n_nu * log(cur_val);
+    prop_lik += -n_nu * log(prop_val);
+
+    mhv.setCurPrior(0.0);
+    mhv.setPropPrior(0.0);
+    if (prop_val > 10.0) {
+        mhv.setPropPrior(-INFINITY);
+    }
+    mhv.setCurLik(cur_lik);
+    mhv.setPropLik(prop_lik);
+    mhv.setPropToCur(-log(cur_val));
+    mhv.setCurToProp(-log(prop_val));
+
+    if (log(RngStream_RandU01(rng)) < mhv.logA()) {
+        cauchy_sd_scale = prop_val;
+    }
+    return;
+}
+
+void Hypers::updateMuPrior(RngStream rng, const Eigen::VectorXd & gamma,
+        const Eigen::VectorXd & mu_vec) {
+    double s1 = gamma.sum();
+    double s0 = gamma.size() - s1;
+
+    double mu_mean, mu_prec;
+    mu_mean = mu_overall_bar * n_0;
+    mu_prec = (n_0 + s0 + s1) * tau;
+
+    int i, j, jp1;
+    for (i = 0, j = 0, jp1 = 1; i < gamma.size(); ++i, j += 2, jp1 += 2) {
+        if (gamma(i) > .5) {
+            mu_mean += mu_vec(j);
+            mu_mean += mu_vec(jp1);
+        } else {
+            mu_mean += mu_vec(j);
+        }
+    }
+
+    mu_mean = tau * mu_mean / mu_prec;
+    mu_overall = RngStream_N01(rng) / sqrt(mu_prec) + mu_mean;
+
+    double tau_r = tau_prior_rate + .5 * n_0 * pow(mu_overall - mu_overall_bar, 2);
+    for (int i = 0, j = 0, jp1 = 1; i < gamma.size(); ++i, j += 2, jp1 += 2) {
+        if (gamma(i) > .5) {
+            tau_r += .5 * pow(mu_vec(j) - mu_overall, 2);
+            tau_r += .5 * pow(mu_vec(jp1) - mu_overall, 2);
+        } else {
+            tau_r += .5 * pow(mu_vec(j) - mu_overall, 2);
+        }
+    }
+
+    tau = RngStream_GA1(tau_prior_shape + .5 * (1 + s0 + s1), rng) / tau_r;
+}
+
+
+void Hypers::updateP(RngStream rng, const VectorXd & gamma) {
+    a_counts = At * gamma;
+    double s, a, b;
+    for (int j = 0; j < p.size(); ++j) {
+        s  = a_counts[j];
+        a = p_alpha + s;
+        b = p_beta + total_counts[j] - s;
+        p[j] = RngStream_Beta(a, b, rng);
+    }
+    return;
+}
+
+Linear::Linear(SEXP r_linear_terms, int n_burn, const Hypers & hyp) {
+    if (Rf_isNull(r_linear_terms)) {
+        is_null = true;
+        return;
+    }
+
+    // if we made it here, r_linear_terms is not an empty list
+    is_null = false;
+
+    // check that required named components are present
     initializeListNames();
     List linear_terms(r_linear_terms);
     bool is_ok = checkListNames(r_names, linear_terms);
     if (!is_ok)
         stop("Missing required list elements in Linear component initialization");
 
+    // acquire named components for linear model fitting
     theta = as<VectorXd>(linear_terms["theta"]);
     Lambdat = as<SpMat>(linear_terms["Lambdat"]);
     Zt = as<SpMat>(linear_terms["Zt"]);
     List r_Ztlist = as<List>(linear_terms["Ztlist"]);
+    VectorXi component_p = as<VectorXi>(linear_terms["component_p"]);
 
+
+    // initialize helper vectors/matrices
     b = VectorXd::Constant(Zt.rows(), 0.0);
     u = VectorXd::Constant(Zt.rows(), 0.0);
     fitted = Zt.transpose() * b;
@@ -260,11 +565,10 @@ Linear::Linear(SEXP r_linear_terms, int n_burn) {
     I_p.resize(Zt.rows(), Zt.rows());
     I_p.setIdentity();
     LtZt = Lambdat * Zt;
-    Omega = LtZt * LtZt.transpose() + I_p;
+    Omega = LtZt * LtZt.transpose() +  I_p;
 
     helpers.initialize(r_linear_terms, Omega, Lambdat);
-
-    VectorXi component_p = as<VectorXi>(linear_terms["component_p"]);
+    // initialize block stuff for each sub-component (i.e, term)
     int n_component = r_Ztlist.size();
     for (int k = 0; k < n_component; k++) {
         cov_templates.push_back(CovarianceTemplate(helpers.getOffsetTheta(k),
@@ -279,66 +583,180 @@ Linear::Linear(SEXP r_linear_terms, int n_burn) {
     };
 };
 
-void Linear::update(RngStream rng, const VectorXd & latent_fitted,
-        const VectorXd & mfi_obs_weights, const VectorXd & data_y,
-        const Hypers & hypers) {
+
+Linear::Linear(SEXP r_linear_terms, int n_burn) {
+    if (Rf_isNull(r_linear_terms)) {
+        is_null = true;
+        return;
+    }
+
+    // if we made it here, r_linear_terms is not an empty list
+    is_null = false;
+
+    // check that required named components are present
+    initializeListNames();
+    List linear_terms(r_linear_terms);
+    bool is_ok = checkListNames(r_names, linear_terms);
+    if (!is_ok)
+        stop("Missing required list elements in Linear component initialization");
+
+    // acquire named components for linear model fitting
+    theta = as<VectorXd>(linear_terms["theta"]);
+    Lambdat = as<SpMat>(linear_terms["Lambdat"]);
+    Zt = as<SpMat>(linear_terms["Zt"]);
+    List r_Ztlist = as<List>(linear_terms["Ztlist"]);
+    VectorXi component_p = as<VectorXi>(linear_terms["component_p"]);
+
+
+    // initialize helper vectors/matrices
+    b = VectorXd::Constant(Zt.rows(), 0.0);
+    u = VectorXd::Constant(Zt.rows(), 0.0);
+    fitted = Zt.transpose() * b;
+
+    I_p.resize(Zt.rows(), Zt.rows());
+    I_p.setIdentity();
     LtZt = Lambdat * Zt;
-    work_y_vec = LtZt * mfi_obs_weights.asDiagonal() * (data_y - latent_fitted);
+    Omega = LtZt * LtZt.transpose() +  I_p;
+
+    helpers.initialize(r_linear_terms, Omega, Lambdat);
+    // initialize block stuff for each sub-component (i.e, term)
+    int n_component = r_Ztlist.size();
+    for (int k = 0; k < n_component; k++) {
+        cov_templates.push_back(CovarianceTemplate(helpers.getOffsetTheta(k),
+                component_p(k), 0.0, n_burn));
+
+        SEXP ztk = r_Ztlist[k];
+        Ztlist.push_back(as<SpMat>(ztk));
+    };
+
+    if (!checkBlocks(helpers.block_lambdat, Lambdat)) {
+        stop("Bad lambdat_blocks transfer in Linear::Linear(SEXP) constructor");
+    };
+};
+
+
+void Linear::updateU(RngStream rng, const Eigen::VectorXd & latent_fitted,
+            const Eigen::VectorXd & mfi_obs_weights, const Eigen::VectorXd & data_y,
+            const Hypers & hypers) {
+    if (is_null) {
+        return;
+    }
     Omega = LtZt * mfi_obs_weights.asDiagonal() * LtZt.transpose() + I_p;
+    work_y_vec = LtZt *
+            mfi_obs_weights.asDiagonal() * (data_y - latent_fitted);
     /* sample will be stored in u */
     mvNormSim(rng, helpers.solver, Omega, work_y_vec, u);
     /* update b and fitted */
     setFitted();
+    return;
+}
 
+void Linear::updateTheta(RngStream rng, const Eigen::VectorXd & latent_fitted,
+            const Eigen::VectorXd & mfi_obs_weights, const Eigen::VectorXd & data_y,
+            const Hypers & hypers) {
+    if (is_null) {
+        return;
+    }
     for (size_t i = 0; i < cov_templates.size(); ++i) {
         updateComponent(rng, latent_fitted, mfi_obs_weights, data_y,
-                (int) i, Ztlist[i], helpers.block_lambdat[i], cov_templates[i]);
+                (int) i, Ztlist[i], helpers.block_lambdat[i], cov_templates[i], hypers);
     };
+    setFitted();
+    return;
 }
 
 void Linear::updateComponent(RngStream rng, const VectorXd & latent_fitted,
         const VectorXd & weights, const VectorXd & data_y,
-        const int k,
-        const SparseMatrix<double> & zt_block,
-        SparseMatrix<double> & lambdat_block,
-        CovarianceTemplate & cvt) {
-    const int nb = helpers.nB(k);
-    const int b_offset = helpers.getOffsetB(k);
+        const int k, const SparseMatrix<double> & zt_block,
+        SparseMatrix<double> & lambdat_block, CovarianceTemplate & cvt,
+        const Hypers & hyp) {
     MHValues mhv;
+    LtZt = Lambdat * Zt;
+    work_y_vec.noalias() = LtZt * weights.asDiagonal() * (data_y - latent_fitted);
+    Omega = LtZt * weights.asDiagonal() * LtZt.transpose() + I_p;
+    helpers.solver.factorize(Omega);
 
-    work_y_vec.noalias() = data_y - latent_fitted - fitted;
+    const double cur_lik = thetaLikelihood(weights, Omega, helpers.solver, work_y_vec, u);
+    work_theta_vec = theta * exp(.5 * (RngStream_RandU01(rng) - .5));
 
-    const double cur_lik = thetaLikelihood(work_y_vec, weights);
+    //    cvt.proposeTheta(rng, work_theta_vec, mhv);
+    setLambdaBlock(work_theta_vec, k);
+    LtZt = Lambdat * Zt;
+    work_y_vec.noalias() = LtZt * weights.asDiagonal() * (data_y - latent_fitted);
+    Omega = LtZt * weights.asDiagonal() * LtZt.transpose() + I_p;
+    helpers.solver.factorize(Omega);
 
-    work_theta_vec = theta;
-    cvt.proposeTheta(rng, work_theta_vec, mhv);
+    const double prop_lik = thetaLikelihood(weights, Omega, helpers.solver, work_y_vec, u);
 
-    work_y_vec.noalias() += zt_block.transpose() *
-            lambdat_block.transpose() * u.segment(b_offset, nb);
-
-    setLambdaHelperBlock(work_theta_vec, k);
-    work_y_vec.noalias() -= zt_block.transpose() *
-            lambdat_block.transpose() * u.segment(b_offset, nb);
-    const double prop_lik = thetaLikelihood(work_y_vec, weights);
-
+//    const int nb = helpers.nB(k);
+//    const int b_offset = helpers.getOffsetB(k);
+//    MHValues mhv;
+//
+//    work_y_vec.noalias() = data_y - latent_fitted - fitted;
+//    const double cur_lik = thetaLikelihood(work_y_vec, weights);
+//
+//    work_theta_vec = theta * exp(.1 * (RngStream_RandU01(rng) - .5));
+//    work_y_vec.noalias() += zt_block.transpose() *
+//            lambdat_block.transpose() * u.segment(b_offset, nb);
+//
+//    setLambdaHelperBlock(work_theta_vec, k);
+//    work_y_vec.noalias() -= zt_block.transpose() *
+//            lambdat_block.transpose() * u.segment(b_offset, nb);
+//    const double prop_lik = thetaLikelihood(work_y_vec, weights);
+//
     mhv.setCurLik(cur_lik);
     mhv.setPropLik(prop_lik);
+    mhv.setCurPrior((hyp.theta_shape - 1.0) * log(theta(0)) -
+            hyp.theta_rate * theta(0));
+    mhv.setPropPrior((hyp.theta_shape - 1.0) * log(work_theta_vec(0)) -
+            hyp.theta_rate * work_theta_vec(0));
+    mhv.setCurToProp(-log(work_theta_vec(0)));
+    mhv.setPropToCur(-log(theta(0)));
+
+//    if (log(RngStream_RandU01(rng)) < mhv.logA()) {
+//        // accept proposal
+//        theta.noalias() = work_theta_vec;
+//        setLambdaBlock(theta, k);
+//        // update the internal state of the covariance template
+//        //        cvt.acceptLastProposal(true);
+//        // update fitted values with new
+//        LtZt = Lambdat * Zt;
+//        setFitted();
+//    } else {
+//        // reject proposal
+//        // reset the lambda helper
+//        setLambdaHelperBlock(theta, k);
+//        //        cvt.acceptLastProposal(false);
+//    }
 
     if (log(RngStream_RandU01(rng)) < mhv.logA()) {
         // accept proposal
-        theta.noalias() = work_theta_vec;
-        setLambdaBlock(theta, k);
-        // update the internal state of the covariance template
-        cvt.acceptLastProposal(true);
-        // update fitted values with new
-        setFitted();
+        theta = work_theta_vec;
+//        cvt.acceptLastProposal(true);
     } else {
         // reject proposal
-        // reset the lambda helper
-        setLambdaHelperBlock(theta, k);
-        cvt.acceptLastProposal(false);
+        // reset the lambda block
+//        cvt.acceptLastProposal(false);
+        setLambdaBlock(theta, k);
+        LtZt = Lambdat * Zt;
+        work_y_vec.noalias() = LtZt * weights.asDiagonal() * (data_y - latent_fitted);
+        Omega = LtZt * weights.asDiagonal() * LtZt.transpose() + I_p;
+        helpers.solver.factorize(Omega);
     }
     return;
+}
+
+double thetaLikelihood(const VectorXd & delta, const VectorXd & weights) {
+    return -.5 * delta.cwiseProduct(weights).dot(delta);
+}
+
+double thetaLikelihood(const VectorXd & weights,
+        const SparseMatrix<double> Omega,
+        const SimplicialLLT<SparseMatrix<double> > & solver,
+        const VectorXd & tau,  VectorXd & u) {
+    u = solver.solve(tau);
+    const double lik = .5 * u.dot(tau) - logDeterminant(solver.matrixL());
+    return lik;
 }
 
 void Linear::setLambdaHelperBlock(const VectorXd & new_theta, int block_idx) {
@@ -363,10 +781,6 @@ void Linear::setLambdaBlock(const VectorXd & new_theta, int block_idx) {
         *(Lambdat.valuePtr() + i) = new_theta(helpers.getLind(i));
     }
     return;
-}
-
-double thetaLikelihood(const VectorXd & delta, const VectorXd & weights) {
-    return -.5 * delta.cwiseProduct(weights).dot(delta);
 }
 
 BeadDist::BeadDist(const List & bead_dist) :
@@ -467,7 +881,7 @@ CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_,
 {
     sigma.fill(1.0);
     fillCholeskyDecomp();
-    internal_theta(0) = 1.0;
+    internal_theta(0) = 0.0;
     if (p > 1)
         internal_theta(1) = rho2phi(rho, p);
 };
@@ -475,22 +889,28 @@ CovarianceTemplate::CovarianceTemplate(int offset_val_, int p_, double rho_,
 void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         MHValues & mhv) {
     if (p == 1) {
-        double cur_sig = sigma(0);
-        internal_theta(0) = log(cur_sig);
-        prop_internal_theta(0) = theta_tuner.par_L(0, 0) * RngStream_N01(rng) + internal_theta(0);
+        const double cur_sig = sigma(0);
+        const double log_cur_sig = internal_theta(0);
+        const double log_prop_sig = log_cur_sig + .5 * (RngStream_RandU01(rng) - .5);
+        const double prop_sig = exp(prop_internal_theta(0));
 
         // temporarily fill the internal template state with proposal values
-        const double prop_sig = exp(prop_internal_theta(0));
         sigma.fill(prop_sig);
-        prop_sigma.fill(prop_sig);
         fillCholeskyDecomp();
+
+        // set internal proposal values... this saves the proposal values
+        // for later possible acceptance in CovarianeTemplate::acceptLastProposal
+        prop_internal_theta(0) = log_prop_sig;
+        prop_sigma.fill(prop_sig);
+
+        // fill passed theta vector with proposed theta parameter
         fillTheta(theta);
 
         // set MH proposal and prior values
-        mhv.setCurPrior(-.5 * log(cur_sig) + .5 * cur_sig);
-        mhv.setPropPrior(-.5 * log(prop_sig) + .5 * prop_sig);
-        mhv.setCurToProp( -log(prop_sig));
-        mhv.setPropToCur( -log(cur_sig));
+        mhv.setCurPrior(-.5 * log_cur_sig + .5 * cur_sig);
+        mhv.setPropPrior(-.5 * log_prop_sig + .5 * prop_sig);
+        mhv.setCurToProp(-log_prop_sig);
+        mhv.setPropToCur(-log_cur_sig);
 
         // return to original internal state
         sigma.fill(cur_sig);
@@ -500,15 +920,15 @@ void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         internal_theta(0) = log(cur_sig);
         internal_theta(1) = rho2phi(rho, p);
 
-        prop_internal_theta(0) = RngStream_N01(rng);
-        prop_internal_theta(1) = RngStream_N01(rng);
-        prop_internal_theta = theta_tuner.par_L * prop_internal_theta + internal_theta;
+        prop_internal_theta(0) = RngStream_RandU01(rng);
+        prop_internal_theta(0) = theta_tuner.getScale() * prop_internal_theta(0) + internal_theta(0);
+        prop_rho = RngStream_UnifAB(-1.0 / p, 1.0, rng);
+        prop_internal_theta(1) = rho2phi(prop_rho, p);
 
         const double prop_sig = exp(prop_internal_theta(0));
         const double cur_rho = rho;
         sigma.fill(prop_sig);
         prop_sigma.fill(prop_sig);
-        prop_rho = phi2rho(prop_internal_theta(1), p);
         rho = prop_rho;
         fillCholeskyDecomp();
         fillTheta(theta);
@@ -520,8 +940,8 @@ void CovarianceTemplate::proposeTheta(RngStream rng, VectorXd & theta,
         // from regular scale to sampling scale.
         // for rho, scaled derivative of inverse hyperbolic tangent
         // for sigma, the jacobian is just the value of log_sigma
-        mhv.setCurToProp(log(dphi_drho(prop_rho, p)) - prop_internal_theta(0));
-        mhv.setPropToCur(log(dphi_drho(cur_rho, p)) - internal_theta(0));
+        mhv.setCurToProp(/*log(dphi_drho(prop_rho, p))*/ - prop_internal_theta(0));
+        mhv.setPropToCur(/*log(dphi_drho(cur_rho, p))*/ - internal_theta(0));
 
         sigma.fill(cur_sig);
         rho = cur_rho;

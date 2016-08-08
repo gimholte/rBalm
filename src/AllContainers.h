@@ -123,6 +123,11 @@ class Latent {
     };
 
 public:
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > Omega_bar_solver;
+    Eigen::SparseMatrix<double> Rt;
+    Eigen::VectorXd G_diag, tau, mu_compressed, prior_tau;
+    Eigen::SparseMatrix<double> Omega_bar, V, G;
+
     Eigen::SparseMatrix<double> Mt;
     Eigen::VectorXd gamma;
     Eigen::VectorXd mu_g;
@@ -130,22 +135,26 @@ public:
     Eigen::VectorXd counts;
     // public helpers (can depend on them being in sync with parameters)
     Eigen::VectorXd weights, fitted;
+    std::string var_prior;
 
     Latent(SEXP r_latent_terms);
-    void update(RngStream rng,
-            const Eigen::VectorXd & data_y,
-            const Eigen::VectorXd & linear_fitted,
-            const Hypers & hypers);
 
     void updateMu(RngStream rng,
-            const Eigen::VectorXd & data_y,
-            const Eigen::VectorXd & linear_fitted,
+            const Eigen::VectorXd & y_tilde,
             const Hypers & hypers);
 
     void updateNu(RngStream rng,
-            const Eigen::VectorXd & data_y,
-            const Eigen::VectorXd & linear_fitted,
+            const Eigen::VectorXd & y_tilde,
             const Hypers & hypers);
+
+    void updateMuMarginal(RngStream rng,
+            Linear & linear,
+            const Eigen::VectorXd & data_y,
+            const Hypers & hyp);
+
+    void constructRG(double g01, double g0, double g1,
+            double m_c, double m_0, double m_1);
+    void expandMu();
 };
 
 class MHValues {
@@ -266,10 +275,11 @@ public:
 
     void updateMcmcScale() {
         const double a_prop = ((double) num_accept) / n_check;
+        //Rcpp::Rcout << mcmc_scale << std::endl;
          if (a_prop < fmax(mcmc_ar_target - .05, .05)) {
-             mcmc_scale *= 1.0 - .25 * (mcmc_ar_target - a_prop) / mcmc_ar_target;
+             mcmc_scale *= 1.0 / 1.1;
          } else if (a_prop > fmin(mcmc_ar_target + .05, .95)) {
-             mcmc_scale *= 1.0 + .33 * (a_prop - mcmc_ar_target) / (1.0 - mcmc_ar_target);
+             mcmc_scale *= 1.1;
          }
     }
 
@@ -309,11 +319,14 @@ public:
             return;
         }
         par_L = par_cov.llt().matrixL();
-        par_L *= mcmc_scale;
     }
 
     Eigen::MatrixXd getCov() {
         return par_cov;
+    }
+
+    double getScale() {
+        return mcmc_scale;
     }
 };
 
@@ -528,23 +541,32 @@ public:
 
     // convenient things
     Eigen::VectorXd fitted;
+    bool is_null;
 
     Linear(SEXP r_linear_terms, int n_burn);
-    void update(RngStream rng,
-            const Eigen::VectorXd & latent_fitted,
-            const Eigen::VectorXd & mfi_obs_weights,
-            const Eigen::VectorXd & data_y,
+    Linear(SEXP r_linear_terms, int n_burn, const Hypers & hyp);
+
+    void updateTheta(RngStream rng, const Eigen::VectorXd & latent_fitted,
+            const Eigen::VectorXd & mfi_obs_weights, const Eigen::VectorXd & data_y,
+            const Hypers & hypers);
+
+    void updateU(RngStream rng, const Eigen::VectorXd & latent_fitted,
+            const Eigen::VectorXd & mfi_obs_weights, const Eigen::VectorXd & data_y,
             const Hypers & hypers);
 
     void updateComponent(RngStream rng, const Eigen::VectorXd & latent_fitted,
             const Eigen::VectorXd & weights, const Eigen::VectorXd & data_y,
-            const int k, const Eigen::SparseMatrix<double> & zt_component,
-            Eigen::SparseMatrix<double> & lambdat_block,
-            CovarianceTemplate & cvt);
+            const int k,  const Eigen::SparseMatrix<double> & zt_block,
+            Eigen::SparseMatrix<double> & lambdat_block, CovarianceTemplate & cvt,
+            const Hypers & hyp);
 
     void setFitted() {
         b = Lambdat.transpose() * u;
         fitted = Zt.transpose() * b;
+    }
+
+    bool isNull() const {
+        return is_null;
     }
 
     inline bool checkBlocks(const std::vector<Eigen::SparseMatrix<double> > blocks,
@@ -620,7 +642,15 @@ public:
                         x * (sum_log_nu - lambda_a_prior) - n * R::lgammafn(x);
     }
 
-    void setSummaryStatistics(const Eigen::VectorXd & nu_vec);
+    void setSummaryStatistics(const Eigen::VectorXd & nu_vec) {
+        n = nu_vec.size();
+        sum_nu = nu_vec.sum();
+        sum_log_nu = 0.0;
+        for (int i = 0; i < n; i++) {
+            sum_log_nu += log(nu_vec(i));
+        }
+        return;
+    };
 
     void setPrior(const double la, const double lb) {
         lambda_a_prior = la;
@@ -667,16 +697,22 @@ class Hypers {
     void initializeListNames() {
         if (names_initialized)
             return;
-        r_names.push_back("gam0");
-        r_names.push_back("gam1");
-        r_names.push_back("gam01");
         r_names.push_back("lambda_a_prior");
         r_names.push_back("lambda_b_prior");
         r_names.push_back("bead_precision_rate");
         r_names.push_back("bead_precision_shape");
-        r_names.push_back("p_a_prior");
-        r_names.push_back("p_b_prior");
-
+        r_names.push_back("p_alpha");
+        r_names.push_back("p_beta");
+        r_names.push_back("n_0");
+        r_names.push_back("tau");
+        r_names.push_back("tau_prior_shape");
+        r_names.push_back("tau_prior_rate");
+        r_names.push_back("mu_overall_bar");
+        r_names.push_back("cauchy_sd_scale");
+        r_names.push_back("prec_mean_prior_mean");
+        r_names.push_back("prec_mean_prior_sd");
+        r_names.push_back("prec_var_prior_mean");
+        r_names.push_back("prec_var_prior_sd");
         names_initialized = true;
         return;
     };
@@ -684,26 +720,44 @@ public:
     Rcpp::List fixed_hypers;
 
     //fixed
-    double gam0;
-    double gam1;
-    double gam01;
     double lambda_a_prior;
     double lambda_b_prior;
-    double bead_precision_rate;
-    double bead_precision_shape;
-    double p_a_prior;
-    double p_b_prior;
-
-    // estimated
-    double p;
-    double mfi_nu_shape;
-    double mfi_nu_rate;
-
     ShapeDensity shape_sampler;
 
-    Hypers(SEXP r_fixed_hyper);
-    Hypers();
-    void update(RngStream rng, Eigen::VectorXd & mfi_precision);
+    double bead_precision_rate;
+    double bead_precision_shape;
+    double p_alpha;
+    double p_beta;
+    double tau_prior_shape, tau_prior_rate;
+    double mu_overall_bar;
+    double n_0;
+    double theta_rate, theta_shape;
+    double tau;
+
+    // estimated
+    double mfi_nu_shape;
+    double mfi_nu_rate;
+    double cauchy_sd_scale;
+    double prec_mean_prior_mean;
+    double prec_mean_prior_sd;
+    double prec_var_prior_mean;
+    double prec_var_prior_sd;
+
+    double mu_overall;
+
+    Eigen::SparseMatrix<double> At;
+    Eigen::VectorXd p;
+    Eigen::VectorXd a_counts, total_counts;
+
+    Hypers(SEXP r_fixed_hyper, SEXP r_at_matrix);
+    Hypers(SEXP r_at_matrix);
+    void update(RngStream rng, const Eigen::VectorXd & mfi_precision, const Eigen::VectorXd & gamma,
+            const Eigen::VectorXd & mu_vec, const std::string var_prior);
+    void updateP(RngStream rng, const Eigen::VectorXd & gamma);
+    void updateMuPrior(RngStream rng, const Eigen::VectorXd & gamma,
+            const Eigen::VectorXd & mu_vec);
+    void updateCauchySdScale(RngStream rng, const Eigen::VectorXd & mfi_precision);
+    void updateGammaMeanVarPrior(RngStream rng, const Eigen::VectorXd & mfi_precision);
 
     inline double integratedPrecisionConditional(double x, int n,
             double sum_nu, double sum_log_nu) {
@@ -726,4 +780,9 @@ public:
 };
 
 double thetaLikelihood(const Eigen::VectorXd & delta, const Eigen::VectorXd & weights);
+
+double thetaLikelihood(const Eigen::VectorXd & weights,
+        const Eigen::SparseMatrix<double> omega,
+        const Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > & solver,
+        const Eigen::VectorXd & tau,  Eigen::VectorXd & u);
 #endif

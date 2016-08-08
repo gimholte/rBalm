@@ -14,7 +14,7 @@
 #include <RcppEigenWrap.h>
 #include "utilities.h"
 #include "AllContainers.h"
-#include "rbalm.h"
+#include "bamba.h"
 
 using namespace Eigen;
 using namespace Rcpp;
@@ -89,22 +89,32 @@ Rcpp::List testLinearThetaFilling(SEXP retrms_) {
             _["Lambdat_block1"] = lin.helpers.getLambdaBlock(1));
 }
 
+
 // [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-SEXP rBalmTestNuPriors() {
-    Hypers hypers;
-    RngStream rng = RngStream_CreateStream("");
-    VectorXd nu_g(10);
-    nu_g << 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
-    int n_iter = 1000;
-    MatrixXd out(n_iter, 2);
-    for (int i = 0; i < n_iter; i++) {
-        hypers.update(rng, nu_g);
-        out(i, 0) = hypers.mfi_nu_shape;
-        out(i, 1) = hypers.mfi_nu_rate;
-    }
-    return wrap(out);
+Rcpp::List testConstructR(SEXP retrms_, Eigen::VectorXd r_gamma) {
+    Latent lin(retrms_);
+    lin.gamma = r_gamma;
+    lin.constructRG(.01, .01, .01, 0.0, 0.0, 0.0);
+    return List::create(_["Rt"] = lin.Rt);
 }
+
+//SEXP rBalmTestNuPriors() {
+//    Hypers hypers;
+//    RngStream rng = RngStream_CreateStream("");
+//    VectorXd nu_g(10);
+//    VectorXi latent(10);
+//    nu_g << 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
+//    latent << 1, 0, 1, 0, 1, 0, 0, 1, 0, 1;
+//    int n_iter = 1000;
+//    MatrixXd out(n_iter, 2);
+//    for (int i = 0; i < n_iter; i++) {
+//        hypers.update(rng, nu_g, latent);
+//        out(i, 0) = hypers.mfi_nu_shape;
+//        out(i, 1) = hypers.mfi_nu_rate;
+//    }
+//    return wrap(out);
+//}
 
 // [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]

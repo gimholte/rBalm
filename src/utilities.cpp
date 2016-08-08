@@ -33,6 +33,23 @@ bool checkListNames(const std::vector<std::string> & names, const List & ll) {
     return all_in;
 }
 
+double sigmaLik(const double sig, const double n, const double yss, const double A) {
+    return - log(1.0 + sig * sig / (A * A)) - n * log(sig) -
+            .5 * yss / (sig * sig);
+}
+
+double precisionLik(const double & nu, const double & mu, const double & sig2) {
+    const double s = mu * mu / sig2;
+    const double l = mu / sig2;
+
+    return s * log(l) - R::lgammafn(s) + (s - 1) * log(nu) - nu * l;
+}
+
+double rejectionSamplerProb(const double x, const double A) {
+    const double y = x / (A * A);
+    return y / (y + 1.0);
+}
+
 double rho2phi(double rho, int p) {
     const double one_over_p = 1.0 / p;
     const double rho_full = rho * 2.0 / (1.0 + one_over_p) + (one_over_p - 1.0) / (1.0 + one_over_p);
@@ -52,4 +69,14 @@ double dphi_drho(double rho, int p) {
     const double one_over_p = 1.0 / p;
     const double rho_full = rho * 2.0 / (1.0 + one_over_p) + (one_over_p - 1.0) / (1.0 + one_over_p);
     return (1.0 / (1.0 - pow(rho_full, 2))) *  (2.0 / (1.0 + one_over_p));
+}
+
+// [[Rcpp::depends(RcppEigen)]]
+// [[Rcpp::export]]
+double logDeterminant(const Eigen::MatrixXd & S) {
+    double det = 0.0;
+    for (int i = 0; i < S.rows(); ++i) {
+        det += log(S(i, i));
+    }
+    return det;
 }

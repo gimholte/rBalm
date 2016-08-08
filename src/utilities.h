@@ -46,6 +46,11 @@ double unimodalSliceSampler(RngStream rng, const double x_init,
     return s;
 }
 
+double rejectionSamplerProb(const double x, const double A);
+
+double sigmaLik(const double sig, const double n, const double yss, const double A);
+
+double precisionLik(const double & nu, const double & mu, const double & sig2);
 
 void mvNormSim(RngStream rng, Eigen::SimplicialLLT<Eigen::SparseMatrix<double> > & solver,
         const Eigen::SparseMatrix<double> & omega, const Eigen::VectorXd & tau,
@@ -57,4 +62,5 @@ double rho2phi(double rho, int p);
 double phi2rho(double phi, int p);
 double drho_dphi(double phi, int p);
 double dphi_drho(double rho, int p);
+double logDeterminant(const Eigen::MatrixXd & S);
 #endif

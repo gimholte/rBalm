@@ -4,14 +4,27 @@
 \alias{rBalm}
 \title{Robust Bayesian analysis of Luminex bead-based assays}
 \usage{
-rBalm(data, n_iter, n_burn)
+rBalm(latent, tech = NULL, mfi_by, data, n_sample, n_thin, n_burn,
+  update_beads = TRUE, prior_control = NULL)
 }
 \arguments{
-\item{data}{todo}
+\item{latent}{effect formula}
 
-\item{n_iter}{todo}
+\item{mfi_by}{by statement for reducing data table}
 
-\item{n_burn}{todo}
+\item{data}{data frame}
+
+\item{n_thin}{thinning interval between samples}
+
+\item{n_burn}{burn in samples}
+
+\item{update_beads}{should bead-level parameters be updated?}
+
+\item{prior_control}{list of named hyperparameters and values}
+
+\item{technical}{effects random effect formula}
+
+\item{n_iter}{number of samples to collect}
 }
 \value{
 some output
