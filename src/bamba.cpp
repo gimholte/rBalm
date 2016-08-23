@@ -35,7 +35,7 @@ Bamba::Bamba(SEXP r_bead_list, SEXP r_chain_pars,
     trace_p.resize(hypers.At.rows(), n_iter);
     trace_mu_g.resize(latent.Mt.rows(), n_iter);
     trace_nu_g.resize(latent.Mt.rows(), n_iter);
-    trace_hypers.resize(4, n_iter);
+    trace_hypers.resize(5, n_iter);
     trace_bead_mfi.resize(latent.Mt.cols(), n_iter);
     trace_bead_prec.resize(latent.Mt.cols(), n_iter);
     ppr.resizeLike(latent.gamma);
@@ -48,7 +48,7 @@ void Bamba::iterate() {
     } else {
         y_tilde =  data.y - linear.fitted;
     }
-    latent.updateMu(rng, y_tilde, hypers);
+    latent.updateGamma(rng, y_tilde, hypers);
     latent.updateMuMarginal(rng, linear, data.y, hypers);
 
     if (linear.isNull()) {
@@ -91,11 +91,14 @@ void Bamba::gatherTrace(const int i) {
         trace_hypers(0, i) = hypers.mfi_nu_shape;
         trace_hypers(1, i) = hypers.mfi_nu_rate;
     }
-    if (latent.var_prior == "half_cauchy") {
-        trace_hypers(0, i) = hypers.cauchy_sd_scale;
+    if (latent.var_prior == "folded_t") {
+        trace_hypers(0, i) =
+                hypers.folded_t_location;
+        trace_hypers(1, i) = hypers.folded_t_scale;
     }
     trace_hypers(2, i) = hypers.tau;
     trace_hypers(3, i) = hypers.mu_overall;
+    trace_hypers(4, i) = hypers.sig_delta;
 
     // bead level parameters
     trace_bead_mfi.col(i) = data.y;
@@ -125,8 +128,8 @@ SEXP bambaMcmc(SEXP r_bead_list, SEXP r_chain_pars,
     int n_iter = model.chain_pars.nIter();
     int n_burn = model.chain_pars.nBurn();
 
-    model.latent.mu_g = (model.latent.Mt * model.data.y).cwiseQuotient(model.latent.counts);
-    model.latent.fitted = model.latent.Mt.transpose() * model.latent.mu_g;
+    //model.latent.mu_g = (model.latent.Mt * model.data.y).cwiseQuotient(model.latent.counts);
+    //model.latent.fitted = model.latent.Mt.transpose() * model.latent.mu_g;
 
     for (int i = 0; i < n_burn; i++) {
         model.iterate();

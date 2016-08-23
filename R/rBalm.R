@@ -20,15 +20,16 @@
 
 rBalm <- function(latent, tech = NULL, mfi_by, data,
         n_sample, n_thin, n_burn, update_beads = TRUE,
-        prior_control = NULL) {
+        prior_control = NULL, offset = 0) {
     chain <- list(n_iter = n_sample, n_thin = n_thin, n_burn = n_burn)
     chain[["update_beads"]] = TRUE
     chain[["update_nu_prior"]] = TRUE
     setkeyv(data, strsplit(mfi_by, ",")[[1]])
-    mfi_simp_dat <- data[, list(mfi = as.double(median(log1p(fl)))),
+    mfi_simp_dat <- data[, list(mfi = as.double(median(log1p(fl)) - offset),
+                    n = .N),
             by = eval(mfi_by)]    
     i <- mfi_simp_dat[data, which = TRUE]
-    bead_dist_list <- beadListInit(split(log1p(data$fl), f = i))
+    bead_dist_list <- beadListInit(split(log1p(data$fl) - offset, f = i))
     lform_latent = lFormula(latent, data = mfi_simp_dat)$reTrms 
     at_matrix <- makeAnalyteFrame(lform_latent)
     lform_tech = NULL
@@ -39,37 +40,32 @@ rBalm <- function(latent, tech = NULL, mfi_by, data,
     }
     hyper_list <- mergeHyperLists(prior_control)
     lform_latent$var_prior = hyper_list$var_prior
+    Dt <- makeDeltaModelMatrix(lform_latent$Zt)
+    lform_latent$Dt <- Dt
     # C call
-    output <- rBalmMcmc(bead_dist_list, chain, lform_latent, lform_tech, 
+    output <- bambaMcmc(bead_dist_list, chain, lform_latent, lform_tech, 
             hyper_list, at_matrix, update_beads)    
     
-    sub_id <- paste0("subject", rownames(lform_latent$Zt))    
-    ind_split <- split(1:ncol(output$mu_g), f = sub_id)
-    response_prob <- sapply(ind_split, function(i) {
-                pairs <- output$mu_g[,i]
-                mean(abs(pairs[,1] - pairs[,2]) > 1e-13 * (abs(pairs[,1]) + abs(pairs[,2])))
-            })
-    response_prob_new <- sapply(ind_split, function(i) {
-                i0 <- i[2] / 2
-                output$ppr[i0]
-            })    
-    return(list(ppr = response_prob, trace = output, mfi_dat = mfi_simp_dat, 
+    group_id <- rownames(lform_latent$Zt)[seq(1, nrow(lform_latent$Zt), by = 2)]
+    names(output$ppr) <- group_id
+    return(list(trace = output, mfi_dat = mfi_simp_dat, 
                     lform_tech = lform_tech, 
                     lform_latent = lform_latent,
-                    ppr_new = response_prob_new))    
+                    ppr = output$ppr))    
 }
 
 rBalm_cInput <- function(latent, tech = NULL, mfi_by, data,
         n_sample, n_thin, n_burn, update_beads = TRUE,
-        prior_control = NULL) {
+        prior_control = NULL, offset = 0) {
     chain <- list(n_iter = n_sample, n_thin = n_thin, n_burn = n_burn)
     chain[["update_beads"]] = TRUE
     chain[["update_nu_prior"]] = TRUE
     setkeyv(data, strsplit(mfi_by, ",")[[1]])
-    mfi_simp_dat <- data[, list(mfi = as.double(median(log1p(fl)))),
+    mfi_simp_dat <- data[, list(mfi = as.double(median(log1p(fl)) - offset),
+                    n = .N),
             by = eval(mfi_by)]    
     i <- mfi_simp_dat[data, which = TRUE]
-    bead_dist_list <- beadListInit(split(log1p(data$fl), f = i))
+    bead_dist_list <- beadListInit(split(log1p(data$fl) - offset, f = i))
     lform_latent = lFormula(latent, data = mfi_simp_dat)$reTrms 
     at_matrix <- makeAnalyteFrame(lform_latent)
     lform_tech = NULL
@@ -79,24 +75,11 @@ rBalm_cInput <- function(latent, tech = NULL, mfi_by, data,
         lform_tech = c(lform_tech, helpers)
     }
     hyper_list <- mergeHyperLists(prior_control)
-    # C call
-    output <- rBalmMcmc(bead_dist_list, chain, lform_latent, lform_tech, 
-            hyper_list, at_matrix, update_beads)    
-    
-    sub_id <- paste0("subject", rownames(lform_latent$Zt))    
-    ind_split <- split(1:ncol(output$mu_g), f = sub_id)
-    response_prob <- sapply(ind_split, function(i) {
-                pairs <- output$mu_g[,i]
-                mean(abs(pairs[,1] - pairs[,2]) > 1e-13 * (abs(pairs[,1]) + abs(pairs[,2])))
-            })
-    response_prob_new <- sapply(ind_split, function(i) {
-                i0 <- i[2] / 2
-                output$ppr[i0]
-            })    
-    return(list(ppr = response_prob, trace = output, mfi_dat = mfi_simp_dat, 
-                    lform_tech = lform_tech, 
-                    lform_latent = lform_latent,
-                    ppr_new = response_prob_new))    
+    lform_latent$var_prior = hyper_list$var_prior
+    Dt <- makeDeltaModelMatrix(lform_latent$Zt)
+    lform_latent$Dt <- Dt
+    return(list(lform_tech = lform_tech, lform_latent = lform_latent,
+                    bead_dist_list = bead_dist_list, hyper_list = hyper_list))    
 }
 
 #' @title Helpers for parameterizing Lambda 
@@ -117,6 +100,19 @@ makeAnalyteFrame <- function(lf_lat) {
     analyte_id_all <- sapply(strsplit(rownames(lf_lat$Zt), split = ":"), `[[`, k_analyte)
     analyte <- as.factor(analyte_id_all[seq(1, nrow(lf_lat$Zt), by = 2)])
     t(as(model.matrix(~ 0 + analyte), "dgCMatrix"))
+}
+
+makeDeltaModelMatrix <- function(Mt) {
+    npair <- nrow(Mt) / 2
+    Dt <- Mt
+    for (i in 1:npair) {
+        j <- 2 * i - 1
+        jp1 <- 2 * i
+        Dt[j,] <- Dt[j,] + Mt[jp1,]
+        Dt[jp1,] <- .5 * Dt[jp1,]
+        Dt[jp1,] <- Dt[jp1,] - .5 * Mt[j,]
+    }
+    return(Dt)
 }
 
 mergeHyperLists <- function(user_input = NULL) {
@@ -169,7 +165,9 @@ defaultHyperList <- function() {
             # rates for exponential priors on a, b
             lambda_a_prior = .0005,
             lambda_b_prior = .0005,
-            cauchy_sd_scale = .05,
+            folded_t_scale = .05,
+            folded_t_location = .1,
+            folded_t_df = 5.0,
             
             # bead precision scale parameter priors
             bead_precision_shape = .5,
@@ -185,7 +183,10 @@ defaultHyperList <- function() {
             prec_mean_prior_mean = 50,
             prec_mean_prior_sd = 100, 
             prec_var_prior_mean = 50 * 50, 
-            prec_var_prior_sd = 2500
+            prec_var_prior_sd = 2500,
+    
+            sig_delta = 1,
+            sig_delta_scale = 4.0
         )
     return(hyp)
 }

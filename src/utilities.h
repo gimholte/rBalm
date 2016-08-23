@@ -46,9 +46,11 @@ double unimodalSliceSampler(RngStream rng, const double x_init,
     return s;
 }
 
+double foldedTDensity(const double x, const double loc, const double scale, const double df);
+double pow2(const double x);
 double rejectionSamplerProb(const double x, const double A);
 
-double sigmaLik(const double sig, const double n, const double yss, const double A);
+double sigmaLik(const double sig, const double n, const double yss);
 
 double precisionLik(const double & nu, const double & mu, const double & sig2);
 

@@ -128,7 +128,7 @@ public:
     Eigen::VectorXd G_diag, tau, mu_compressed, prior_tau;
     Eigen::SparseMatrix<double> Omega_bar, V, G;
 
-    Eigen::SparseMatrix<double> Mt;
+    Eigen::SparseMatrix<double> Mt, Dt;
     Eigen::VectorXd gamma;
     Eigen::VectorXd mu_g;
     Eigen::VectorXd nu_g;
@@ -139,7 +139,7 @@ public:
 
     Latent(SEXP r_latent_terms);
 
-    void updateMu(RngStream rng,
+    void updateGamma(RngStream rng,
             const Eigen::VectorXd & y_tilde,
             const Hypers & hypers);
 
@@ -708,11 +708,15 @@ class Hypers {
         r_names.push_back("tau_prior_shape");
         r_names.push_back("tau_prior_rate");
         r_names.push_back("mu_overall_bar");
-        r_names.push_back("cauchy_sd_scale");
+        r_names.push_back("folded_t_scale");
+        r_names.push_back("folded_t_location");
+        r_names.push_back("folded_t_df");
         r_names.push_back("prec_mean_prior_mean");
         r_names.push_back("prec_mean_prior_sd");
         r_names.push_back("prec_var_prior_mean");
         r_names.push_back("prec_var_prior_sd");
+        r_names.push_back("sig_delta");
+        r_names.push_back("sig_delta_scale");
         names_initialized = true;
         return;
     };
@@ -737,13 +741,19 @@ public:
     // estimated
     double mfi_nu_shape;
     double mfi_nu_rate;
-    double cauchy_sd_scale;
+
+    double folded_t_scale;
+    double folded_t_location;
+    double folded_t_df;
+
     double prec_mean_prior_mean;
     double prec_mean_prior_sd;
     double prec_var_prior_mean;
     double prec_var_prior_sd;
 
     double mu_overall;
+    double sig_delta;
+    double sig_delta_scale;
 
     Eigen::SparseMatrix<double> At;
     Eigen::VectorXd p;
@@ -756,8 +766,9 @@ public:
     void updateP(RngStream rng, const Eigen::VectorXd & gamma);
     void updateMuPrior(RngStream rng, const Eigen::VectorXd & gamma,
             const Eigen::VectorXd & mu_vec);
-    void updateCauchySdScale(RngStream rng, const Eigen::VectorXd & mfi_precision);
+    void updateFoldedT(RngStream rng, const Eigen::VectorXd & mfi_precision);
     void updateGammaMeanVarPrior(RngStream rng, const Eigen::VectorXd & mfi_precision);
+    void updateDeltaSigma(RngStream rng, const Eigen::VectorXd & mu_g, const Eigen::VectorXd & gamma);
 
     inline double integratedPrecisionConditional(double x, int n,
             double sum_nu, double sum_log_nu) {

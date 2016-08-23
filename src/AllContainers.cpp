@@ -97,10 +97,11 @@ Latent::Latent(SEXP r_latent_term) {
 
     var_prior = as<std::string>(latent_term["var_prior"]);
     Mt = latent_term["Zt"]; // implicit conversion
-    const int nmu = Mt.rows();
-    const int nobs = Mt.cols();
+    Dt = latent_term["Dt"];
+    const int nmu = Dt.rows();
+    const int nobs = Dt.cols();
     Rt.resize(nmu, nobs);
-    Rt.reserve(VectorXi::Constant(Mt.cols(), 1));
+    Rt.reserve(VectorXi::Constant(Dt.cols(), 2));
 
     Omega_bar.resize(nobs, nobs);
     G_diag.resize(nmu);
@@ -125,7 +126,7 @@ Latent::Latent(SEXP r_latent_term) {
     sum_y_w = VectorXd::Constant(nmu, 0.0);
     sum_yy_w = VectorXd::Constant(nmu, 0.0);
     resid = VectorXd::Constant(nobs, 1.0);
-    fitted = Mt.transpose() * mu_g;
+    fitted = Dt.transpose() * mu_g;
     weights = Mt.transpose() * nu_g;
     V = V * weights.asDiagonal();
 };
@@ -144,14 +145,16 @@ void Latent::updateNu(RngStream rng, const VectorXd & y_tilde,
             joint_rate = hypers.mfi_nu_rate + yss_w(j) / 2.0;
             nu_g(j) = RngStream_GA1(joint_shape, rng) / joint_rate;
         }
-        if (var_prior == "half_cauchy") {
+        if (var_prior == "folded_t") {
             cur_val = 1.0 / sqrt(nu_g(j));
             prop_val = cur_val * exp(.5* RngStream_UnifAB(-1.0, 1.0, rng));
 
-            mhv.setCurLik(sigmaLik(cur_val, counts(j), yss_w(j), hypers.cauchy_sd_scale));
-            mhv.setPropLik(sigmaLik(prop_val, counts(j), yss_w(j), hypers.cauchy_sd_scale));
-            mhv.setCurPrior(0.0);
-            mhv.setPropPrior(0.0);
+            mhv.setCurLik(sigmaLik(cur_val, counts(j), yss_w(j)));
+            mhv.setPropLik(sigmaLik(prop_val, counts(j), yss_w(j)));
+            mhv.setCurPrior(foldedTDensity(cur_val, hypers.folded_t_location,
+                    hypers.folded_t_scale, hypers.folded_t_df));
+            mhv.setPropPrior(foldedTDensity(prop_val, hypers.folded_t_location,
+                    hypers.folded_t_scale, hypers.folded_t_df));
             mhv.setPropToCur(-log(cur_val));
             mhv.setCurToProp(-log(prop_val));
 
@@ -166,61 +169,52 @@ void Latent::updateNu(RngStream rng, const VectorXd & y_tilde,
     return;
 }
 
-void Latent::updateMu(RngStream rng, const VectorXd & y_tilde,
+void Latent::updateGamma(RngStream rng, const VectorXd & y_tilde,
         const Hypers & hypers) {
-    double c0, c1, c01;
-    double l0, l1, l01;
-    double mu0, mu1, mu01;
+    double c0, c1, d0, d1;
+    double delta_mu, delta_prec;
     double null_prob;
     double p_local;
     VectorXd p_fitted = hypers.At.transpose() * hypers.p;
     sum_y_w.noalias() = Mt * (y_tilde).cwiseProduct(weights);
 
     size_t i, j, jp1, n_group = mu_g.size() / 2;
-    for (i = 0, j = 0, jp1 = 1;
-            i < n_group;
-            ++i, j += 2, jp1 += 2) {
-        l0 = hypers.tau + counts(j) * nu_g(j);
-        l1 = hypers.tau + counts(jp1) * nu_g(jp1);
-        l01 = hypers.tau + counts(j) * nu_g(j) + counts(jp1) * nu_g(jp1);
+    for (i = 0, j = 0, jp1 = 1; i < n_group; ++i, j += 2, jp1 += 2) {
 
-        mu0 = (sum_y_w(j) + hypers.tau * hypers.mu_overall) / l0;
-        mu1 = (sum_y_w(jp1) + hypers.tau * hypers.mu_overall) / l1;
-        mu01 = (sum_y_w(j) + sum_y_w(jp1) + hypers.tau * hypers.mu_overall) / l01;
-
-        c0 = .5 * pow(mu0, 2) * l0 + .5 * log(hypers.tau) - .5 * log(l0);
-        c1 = .5 * pow(mu1, 2) * l1 + .5 * log(hypers.tau) - .5 * log(l1);
-        c01 = .5 * pow(mu01, 2) * l01 + .5 * log(hypers.tau) - .5 * log(l01);
-
+        delta_prec = .25 * counts(j) * nu_g(j) + .25 * counts(jp1) * nu_g(jp1) +
+                1.0 / pow2(hypers.sig_delta);
+        d0 = sum_y_w(j) - counts(j) * mu_g(j) * nu_g(j);
+        d1 = sum_y_w(jp1) - counts(jp1) * mu_g(j) * nu_g(jp1);
+        delta_mu = .5 * (d1 - d0) / delta_prec;
         p_local = p_fitted[i];
-        null_prob = (1 - p_local) / (p_local * exp(c0 + c1 - c01) + (1 - p_local));
+        c1 = .5 * pow2(delta_mu) * delta_prec - .5 * log(delta_prec) - log(hypers.sig_delta);
+        c0 = 0.0;
+
+        null_prob = (1 - p_local) / (p_local * exp(c1 - c0) + (1 - p_local));
 
         if (RngStream_RandU01(rng) < null_prob) {
-            mu01 = RngStream_N01(rng) / sqrt(l01) + mu01;
-            mu_g(j) = mu01;
-            mu_g(jp1) = mu01;
+            mu_g(jp1) = 0.0;
             gamma(i) = 0.0;
         } else {
-            mu_g(j) = RngStream_N01(rng) / sqrt(l0) + mu0;
-            mu_g(jp1) = RngStream_N01(rng) / sqrt(l1) + mu1;
+            mu_g(jp1) = RngStream_N01(rng) / sqrt(delta_prec) + delta_mu;
             gamma(i) = 1.0;
         }
     }
-    fitted = Mt.transpose() * mu_g;
+    fitted = Dt.transpose() * mu_g;
     return;
 }
 
 void Latent::constructRG(double g01, double g0, double g1,
         double m_c, double m_0, double m_1) {
     int n_terms = gamma.size() + (int) gamma.sum();
-    Rt.resize(n_terms, Mt.cols());
-    Rt.reserve(VectorXi::Constant(Mt.cols(), 1));
+    Rt.resize(n_terms, Dt.cols());
+    Rt.reserve(VectorXi::Constant(Dt.cols(), 2));
 
     G_diag.resize(n_terms);
     G.resize(n_terms, n_terms);
     G.setIdentity();
     prior_tau.resize(n_terms);
-    VectorXi rowMap(Mt.rows());
+    VectorXi rowMap(Dt.rows());
     int new_row = 0;
 
     for (int k = 0, j = 0; k < gamma.size(); ++k) {
@@ -240,13 +234,31 @@ void Latent::constructRG(double g01, double g0, double g1,
         ++j;
     }
 
-    for (int k = 0; k < Mt.outerSize(); ++k)
-        for (SparseMatrix<double>::InnerIterator it(Mt,k); it; ++it)
+//    for (int k = 0; k < Dt.outerSize(); ++k)
+//        for (SparseMatrix<double>::InnerIterator it(Dt,k); it; ++it)
+//        {
+//            new_row = rowMap[it.row()];   // row index remapped based on gamma
+//            Rt.insert(new_row, it.col()) = it.value();
+//        }
+    int j;
+    for (int k = 0; k < Dt.outerSize(); ++k)
+        for (SparseMatrix<double>::InnerIterator it(Dt,k); it; ++it)
         {
-            new_row = rowMap[it.row()];   // row index remapped based on gamma
-            Rt.insert(new_row, it.col()) = it.value();
+            if (it.row() % 2 == 0) {
+                new_row = rowMap[it.row()];   // row index remapped based on gamma
+                Rt.insert(new_row, it.col()) = it.value();
+            } else {
+                j = (it.row() - 1) / 2;
+                //Rcout << j << std::endl;
+                if (gamma(j) > .5) {
+                    new_row = rowMap[it.row()];   // row index remapped based on gamma
+                    Rt.insert(new_row, it.col()) = it.value();
+                }
+            }
+
         }
 
+    Rt.makeCompressed();
     G = G * G_diag.asDiagonal();
     prior_tau = G * prior_tau;
     return;
@@ -257,8 +269,8 @@ void Latent::updateMuMarginal(RngStream rng,
         const Eigen::VectorXd & data_y,
         const Hypers & hyp) {
 
-    constructRG(hyp.tau, hyp.tau, hyp.tau,
-            hyp.mu_overall, hyp.mu_overall, hyp.mu_overall);
+    constructRG(hyp.tau, hyp.tau, 1.0 / pow2(hyp.sig_delta),
+            hyp.mu_overall, hyp.mu_overall, 0.0);
     mu_compressed.resize(Rt.rows());
     if (linear.isNull()) {
         Omega_bar = V;
@@ -278,7 +290,7 @@ void Latent::updateMuMarginal(RngStream rng,
 
     mvNormSim(rng, Omega_bar_solver, Omega_bar, tau, mu_compressed);
     expandMu();
-    fitted = Mt.transpose() * mu_g;
+    fitted = Dt.transpose() * mu_g;
 }
 
 void Latent::expandMu() {
@@ -287,7 +299,7 @@ void Latent::expandMu() {
     for (int i = 0; i < n_groups; i++) {
         if (gamma[i] < .5) {
             mu_g[2 * i] = mu_compressed[k];
-            mu_g[2 * i + 1] = mu_compressed[k];
+            mu_g[2 * i + 1] = 0.0;
         } else {
             mu_g[2 * i] = mu_compressed[k];
             k++;
@@ -322,13 +334,18 @@ Hypers::Hypers(SEXP r_fixed_hypers, SEXP r_at_matrix) :
 
     mfi_nu_shape = 5;
     mfi_nu_rate = .05;
-    cauchy_sd_scale = as<double>(fixed_hypers["cauchy_sd_scale"]);
+    folded_t_scale = as<double>(fixed_hypers["folded_t_scale"]);
+    folded_t_location = as<double>(fixed_hypers["folded_t_location"]);
+    folded_t_df = as<double>(fixed_hypers["folded_t_df"]);
+
     prec_mean_prior_mean = as<double>(fixed_hypers["prec_mean_prior_mean"]);
     prec_mean_prior_sd = as<double>(fixed_hypers["prec_mean_prior_sd"]);
     prec_var_prior_mean = as<double>(fixed_hypers["prec_var_prior_mean"]);
     prec_var_prior_sd = as<double>(fixed_hypers["prec_var_prior_sd"]);
 
     mu_overall = 0.0;
+    sig_delta = as<double>(fixed_hypers["sig_delta"]);
+    sig_delta_scale = as<double>(fixed_hypers["sig_delta_scale"]);
 
     At = as<SparseMatrix<double> >(r_at_matrix);
     p.resize(At.rows());
@@ -361,12 +378,15 @@ Hypers::Hypers(SEXP r_at_matrix) :
 
     tau = .05;
     mu_overall = 0.0;
+    sig_delta = 1.0;
+    sig_delta_scale = 4.0;
 
     mfi_nu_shape = .0005;
     mfi_nu_rate = .0005;
 
-
-    cauchy_sd_scale = .1;
+    folded_t_scale = .1;
+    folded_t_location = 0.01;
+    folded_t_df = 4.0;
 
     prec_mean_prior_mean = 50.0;
     prec_mean_prior_sd = 50.0;
@@ -395,12 +415,13 @@ void Hypers::update(RngStream rng, const VectorXd & mfi_precision, const VectorX
         const double sum_nu = shape_sampler.getSumNu();
         mfi_nu_rate = RngStream_GA1(1.0 + n * mfi_nu_shape, rng) / (sum_nu + lambda_b_prior);
     }
-    if (var_prior == "half_cauchy"){
-        updateCauchySdScale(rng, mfi_precision);
+    if (var_prior == "folded_t"){
+        updateFoldedT(rng, mfi_precision);
     }
     if (var_prior == "gamma_mean_var") {
         updateGammaMeanVarPrior(rng, mfi_precision);
     }
+    updateDeltaSigma(rng, mu_vec, gamma);
     updateMuPrior(rng, gamma, mu_vec);
     updateP(rng, gamma);
 }
@@ -453,71 +474,85 @@ void Hypers::updateGammaMeanVarPrior(RngStream rng, const VectorXd & mfi_precisi
     mfi_nu_rate = mu_cur / sig_cur;
 }
 
-void Hypers::updateCauchySdScale(RngStream rng, const VectorXd & mfi_precision) {
+void Hypers::updateFoldedT(RngStream rng, const VectorXd & mfi_precision) {
     MHValues mhv;
-    double nu, cur_lik(0.0), prop_lik(0.0);
-    const double cur_val = cauchy_sd_scale;
-    const double prop_val = cur_val * exp(.5 * RngStream_UnifAB(-1.0, 1.0, rng));
+    double sig, cur_lik(0.0), prop_lik(0.0);
+    double cur_scale = folded_t_scale;
+    const double prop_scale = cur_scale * exp(.5 * RngStream_UnifAB(-1.0, 1.0, rng));
 
     int j;
     for (j = 0; j < mfi_precision.size(); ++j) {
-        nu = mfi_precision(j);
-        cur_lik += -log1p(1.0 / (cur_val * cur_val * nu));
-        prop_lik += -log1p(1.0 / (prop_val * prop_val * nu));
+        sig = 1.0 / sqrt(mfi_precision(j));
+        cur_lik += foldedTDensity(sig, folded_t_location, cur_scale, folded_t_df);
+        prop_lik += foldedTDensity(sig, folded_t_location, prop_scale, folded_t_df);
     }
-    double n_nu = (double) mfi_precision.size();
-    cur_lik += -n_nu * log(cur_val);
-    prop_lik += -n_nu * log(prop_val);
 
     mhv.setCurPrior(0.0);
     mhv.setPropPrior(0.0);
-    if (prop_val > 10.0) {
+    if (prop_scale > 10.0) {
+        mhv.setPropPrior(-INFINITY);
+    }
+
+    mhv.setCurLik(cur_lik);
+    mhv.setPropLik(prop_lik);
+    mhv.setPropToCur(-log(cur_scale));
+    mhv.setCurToProp(-log(prop_scale));
+
+    if (log(RngStream_RandU01(rng)) < mhv.logA()) {
+        cur_scale = prop_scale;
+    }
+
+    cur_lik = 0.0;
+    prop_lik = 0.0;
+    double cur_loc = folded_t_location;
+    const double prop_loc = cur_loc * exp(.5 * RngStream_UnifAB(-1.0, 1.0, rng));
+    for (j = 0; j < mfi_precision.size(); ++j) {
+        sig = 1.0 / sqrt(mfi_precision(j));
+        cur_lik += foldedTDensity(sig, cur_loc, cur_scale, folded_t_df);
+        prop_lik += foldedTDensity(sig, prop_loc, cur_scale, folded_t_df);
+    }
+
+    mhv.setCurPrior(0.0);
+    mhv.setPropPrior(0.0);
+    if (prop_loc > 10.0) {
         mhv.setPropPrior(-INFINITY);
     }
     mhv.setCurLik(cur_lik);
     mhv.setPropLik(prop_lik);
-    mhv.setPropToCur(-log(cur_val));
-    mhv.setCurToProp(-log(prop_val));
+    mhv.setPropToCur(-log(cur_loc));
+    mhv.setCurToProp(-log(prop_loc));
 
     if (log(RngStream_RandU01(rng)) < mhv.logA()) {
-        cauchy_sd_scale = prop_val;
+        cur_loc = prop_loc;
     }
+
+    folded_t_location = cur_loc;
+    folded_t_scale = cur_scale;
     return;
 }
 
 void Hypers::updateMuPrior(RngStream rng, const Eigen::VectorXd & gamma,
         const Eigen::VectorXd & mu_vec) {
-    double s1 = gamma.sum();
-    double s0 = gamma.size() - s1;
+    double s0 = gamma.size();
 
     double mu_mean, mu_prec;
     mu_mean = mu_overall_bar * n_0;
-    mu_prec = (n_0 + s0 + s1) * tau;
+    mu_prec = (n_0 + s0) * tau;
 
-    int i, j, jp1;
-    for (i = 0, j = 0, jp1 = 1; i < gamma.size(); ++i, j += 2, jp1 += 2) {
-        if (gamma(i) > .5) {
-            mu_mean += mu_vec(j);
-            mu_mean += mu_vec(jp1);
-        } else {
-            mu_mean += mu_vec(j);
-        }
+    int i, j;
+    for (i = 0, j = 0; i < gamma.size(); ++i, j += 2) {
+        mu_mean += mu_vec(j);
     }
 
     mu_mean = tau * mu_mean / mu_prec;
     mu_overall = RngStream_N01(rng) / sqrt(mu_prec) + mu_mean;
 
     double tau_r = tau_prior_rate + .5 * n_0 * pow(mu_overall - mu_overall_bar, 2);
-    for (int i = 0, j = 0, jp1 = 1; i < gamma.size(); ++i, j += 2, jp1 += 2) {
-        if (gamma(i) > .5) {
-            tau_r += .5 * pow(mu_vec(j) - mu_overall, 2);
-            tau_r += .5 * pow(mu_vec(jp1) - mu_overall, 2);
-        } else {
-            tau_r += .5 * pow(mu_vec(j) - mu_overall, 2);
-        }
+    for (int i = 0, j = 0; i < gamma.size(); ++i, j += 2) {
+        tau_r += .5 * pow2(mu_vec(j) - mu_overall);
     }
 
-    tau = RngStream_GA1(tau_prior_shape + .5 * (1 + s0 + s1), rng) / tau_r;
+    tau = RngStream_GA1(tau_prior_shape + .5 * (1 + s0), rng) / tau_r;
 }
 
 
@@ -532,6 +567,35 @@ void Hypers::updateP(RngStream rng, const VectorXd & gamma) {
     }
     return;
 }
+
+void Hypers::updateDeltaSigma(RngStream rng, const Eigen::VectorXd & mu_g,
+        const Eigen::VectorXd & gamma) {
+    double sum_d_sqrd = 0.0;
+    double n_nonzero = 0.0;
+    MHValues mhv;
+
+    for (int i = 0, j = 1; i < gamma.size(); ++i, j += 2) {
+        sum_d_sqrd += mu_g(j) * mu_g(j);
+        n_nonzero += gamma(i);
+    }
+
+    double cur_sig = sig_delta;
+    double prop_sig = cur_sig * exp(.692 * RngStream_UnifAB(-1, 1, rng));
+    const double A = sig_delta_scale;
+
+    mhv.setCurPrior(- log1p(pow2(cur_sig / A)));
+    mhv.setPropPrior(- log1p(pow2(prop_sig / A)));
+    mhv.setCurLik(- n_nonzero * log(cur_sig) - .5 * sum_d_sqrd / pow2(cur_sig));
+    mhv.setPropLik(- n_nonzero * log(prop_sig) - .5 * sum_d_sqrd / pow2(prop_sig));
+    mhv.setPropToCur(-log(cur_sig));
+    mhv.setCurToProp(-log(prop_sig));
+
+    if (log(RngStream_RandU01(rng)) < mhv.logA())
+        cur_sig = prop_sig;
+
+    sig_delta = cur_sig;
+}
+
 
 Linear::Linear(SEXP r_linear_terms, int n_burn, const Hypers & hyp) {
     if (Rf_isNull(r_linear_terms)) {

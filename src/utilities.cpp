@@ -33,9 +33,8 @@ bool checkListNames(const std::vector<std::string> & names, const List & ll) {
     return all_in;
 }
 
-double sigmaLik(const double sig, const double n, const double yss, const double A) {
-    return - log(1.0 + sig * sig / (A * A)) - n * log(sig) -
-            .5 * yss / (sig * sig);
+double sigmaLik(const double sig, const double n, const double yss) {
+    return - n * log(sig) -.5 * yss / (sig * sig);
 }
 
 double precisionLik(const double & nu, const double & mu, const double & sig2) {
@@ -43,6 +42,16 @@ double precisionLik(const double & nu, const double & mu, const double & sig2) {
     const double l = mu / sig2;
 
     return s * log(l) - R::lgammafn(s) + (s - 1) * log(nu) - nu * l;
+}
+
+double foldedTDensity(const double x, const double loc, const double scale, const double df) {
+    const double pos_part = - ((df + 1.0) / 2.0) * log1p(pow2((x - loc) / scale) / df);
+    const double neg_part = - ((df + 1.0) / 2.0) * log1p(pow2((x + loc) / scale) / df);
+    return - log(scale) + pos_part + log(1 + exp(neg_part - pos_part));
+}
+
+double pow2(const double x) {
+    return x * x;
 }
 
 double rejectionSamplerProb(const double x, const double A) {

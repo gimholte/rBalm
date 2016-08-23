@@ -5,7 +5,7 @@
 \title{Robust Bayesian analysis of Luminex bead-based assays}
 \usage{
 rBalm(latent, tech = NULL, mfi_by, data, n_sample, n_thin, n_burn,
-  update_beads = TRUE, prior_control = NULL)
+  update_beads = TRUE, prior_control = NULL, offset = 0)
 }
 \arguments{
 \item{latent}{effect formula}
